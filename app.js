@@ -11,7 +11,18 @@ import OTP from './models/OTP.js';
 import gridBotEngine from './services/gridBotEngine.js';
 
 const app = express();
-app.set('trust proxy', true);
+// Configure trust proxy securely
+if (process.env.BEHIND_PROXY === 'true') {
+  // Only trust specific proxy IPs from environment
+  const trustedProxies = process.env.TRUSTED_PROXIES 
+    ? process.env.TRUSTED_PROXIES.split(',').map(ip => ip.trim())
+    : ['127.0.0.1', '::1'];
+  
+  app.set('trust proxy', trustedProxies);
+} else {
+  // Don't trust any proxies - use direct connection IP
+  app.set('trust proxy', false);
+}
 // Global error handling for unhandled promise rejections and WebSocket errors
 process.on('unhandledRejection', (reason, promise) => {
   // Don't exit the process, just handle the error
@@ -68,6 +79,28 @@ app.get('/health', (req, res) => {
     timestamp: new Date().toISOString(),
     environment: process.env.NODE_ENV || 'development'
   });
+});
+
+// Time sync endpoint for debugging
+app.get('/api/sync-time', async (req, res) => {
+  try {
+    const { default: binanceService } = await import('./services/binanceService.js');
+    await binanceService.syncServerTime();
+    
+    res.status(200).json({
+      success: true,
+      message: 'Time synchronized with Binance servers',
+      local_time: new Date().toISOString(),
+      offset_ms: binanceService.timeOffset,
+      synced_time: new Date(binanceService.getSyncedTimestamp()).toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Failed to sync time',
+      error: error.message
+    });
+  }
 });
 
 // API routes
@@ -365,6 +398,16 @@ app.listen(PORT, async () => {
   } catch (error) {
     // Handle grid bot engine startup errors silently
   }
+  
+  // Set up periodic time synchronization with Binance (every 5 minutes)
+  const { default: binanceService } = await import('./services/binanceService.js');
+  setInterval(async () => {
+    try {
+      await binanceService.syncServerTime();
+    } catch (error) {
+      // Handle sync errors silently
+    }
+  }, 5 * 60 * 1000); // 5 minutes
 });
 
 export default app; 

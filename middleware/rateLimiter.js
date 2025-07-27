@@ -10,6 +10,15 @@ const generalLimiter = rateLimit({
   },
   standardHeaders: true,
   legacyHeaders: false,
+  // Use both IP and user agent for better rate limiting
+  keyGenerator: (req) => {
+    return `${req.ip}_${req.get('User-Agent') || 'unknown'}`;
+  },
+  // Skip rate limiting for trusted sources if needed
+  skip: (req) => {
+    // Skip rate limiting for health checks
+    return req.path === '/health';
+  }
 });
 
 // Stricter rate limiter for OTP requests
@@ -22,6 +31,11 @@ const otpLimiter = rateLimit({
   },
   standardHeaders: true,
   legacyHeaders: false,
+  // Use email + IP for OTP rate limiting to prevent abuse
+  keyGenerator: (req) => {
+    const email = req.body?.email || 'unknown';
+    return `otp_${req.ip}_${email}`;
+  }
 });
 
 // Very strict rate limiter for OTP verification

@@ -26,11 +26,49 @@ class BinanceService {
     this.wsConnections = new Map(); // Store WebSocket connections
     this.priceCache = new Map(); // Cache real-time prices
     this.clientCache = new Map(); // Cache user-specific clients
+    this.timeOffset = 0; // Server time offset for timestamp sync
+    this.lastSyncTime = 0; // Last time we synced with Binance servers
     this.initializeClients();
   }
 
-  initializeClients() {
+  // Synchronize time with Binance servers
+  async syncServerTime() {
     try {
+      const currentTime = Date.now();
+      
+      // Only sync if we haven't synced in the last 5 minutes
+      if (currentTime - this.lastSyncTime < 5 * 60 * 1000) {
+        return;
+      }
+
+      // Get server time from Binance
+      const response = await fetch('https://api.binance.com/api/v3/time');
+      const data = await response.json();
+      
+      const serverTime = data.serverTime;
+      const localTime = Date.now();
+      
+      // Calculate offset
+      this.timeOffset = serverTime - localTime;
+      this.lastSyncTime = localTime;
+      
+      console.log(`🕐 Time synchronized with Binance. Offset: ${this.timeOffset}ms`);
+      
+    } catch (error) {
+      console.warn('⚠️ Failed to sync time with Binance servers:', error.message);
+      // Don't throw error, just use local time
+    }
+  }
+
+  // Get synchronized timestamp
+  getSyncedTimestamp() {
+    return Date.now() + this.timeOffset;
+  }
+
+  async initializeClients() {
+    try {
+      // Sync time with Binance servers first
+      await this.syncServerTime();
       
       // Validate that we have both test and live keys
       const hasTestKeys = process.env.BINANCE_TEST_API_KEY && process.env.BINANCE_TEST_SECRET_KEY;
@@ -42,9 +80,10 @@ class BinanceService {
         this.testClient = Binance({
           apiKey: process.env.BINANCE_TEST_API_KEY,
           apiSecret: process.env.BINANCE_TEST_SECRET_KEY,
-          getTime: () => Date.now(),
+          getTime: () => this.getSyncedTimestamp(),
           httpBase: 'https://testnet.binance.vision',
-          wsBase: 'wss://testnet.binance.vision/ws'
+          wsBase: 'wss://testnet.binance.vision/ws',
+          recvWindow: 10000 // Increase receive window to 10 seconds
         });
       }
 
@@ -53,7 +92,8 @@ class BinanceService {
         this.client = Binance({
           apiKey: process.env.BINANCE_API_KEY,
           apiSecret: process.env.BINANCE_SECRET_KEY,
-          getTime: () => Date.now()
+          getTime: () => this.getSyncedTimestamp(),
+          recvWindow: 10000 // Increase receive window to 10 seconds
         });
       }
     } catch (error) {
@@ -103,10 +143,14 @@ class BinanceService {
       const decryptedApiKey = encryptionService.decryptSimple(keys.api_key);
       const decryptedSecret = encryptionService.decryptSimple(keys.secret_key);
 
+      // Sync time before creating user client
+      await this.syncServerTime();
+      
       const client = Binance({
         apiKey: decryptedApiKey,
         apiSecret: decryptedSecret,
-        getTime: () => Date.now(),
+        getTime: () => this.getSyncedTimestamp(),
+        recvWindow: 10000, // 10 second receive window
         ...(isTestMode && {
           httpBase: 'https://testnet.binance.vision',
           wsBase: 'wss://testnet.binance.vision/ws'
@@ -141,19 +185,38 @@ class BinanceService {
     }
   }
 
-  // Get account balance
+  // Get account balance with automatic time sync retry
   async getAccountBalance() {
     try {
       const client = this.getClient();
       if (!client) throw new Error('Binance client not initialized');
 
-      const accountInfo = await client.accountInfo();
-      return {
-        success: true,
-        balances: accountInfo.balances.filter(balance => 
-          parseFloat(balance.free) > 0 || parseFloat(balance.locked) > 0
-        )
-      };
+      // Try first with current time sync
+      try {
+        const accountInfo = await client.accountInfo();
+        return {
+          success: true,
+          balances: accountInfo.balances.filter(balance => 
+            parseFloat(balance.free) > 0 || parseFloat(balance.locked) > 0
+          )
+        };
+      } catch (timeError) {
+        // If it's a timestamp error, resync and retry once
+        if (timeError.message.includes('Timestamp') || timeError.message.includes('recvWindow')) {
+          console.log('🔄 Timestamp error detected, resyncing time and retrying...');
+          this.lastSyncTime = 0; // Force resync
+          await this.syncServerTime();
+          
+          const accountInfo = await client.accountInfo();
+          return {
+            success: true,
+            balances: accountInfo.balances.filter(balance => 
+              parseFloat(balance.free) > 0 || parseFloat(balance.locked) > 0
+            )
+          };
+        }
+        throw timeError; // Re-throw if not a timestamp error
+      }
     } catch (error) {
       return {
         success: false,
@@ -258,7 +321,7 @@ class BinanceService {
     }
   }
 
-  // Place a limit order
+  // Place a limit order with timestamp retry
   async placeLimitOrder(userId, symbol, side, quantity, price, isTestMode = true, options = {}) {
     try {
       const client = await this.getUserClient(userId, isTestMode);
@@ -274,22 +337,56 @@ class BinanceService {
         ...options
       };
 
-      const order = await client.order(orderParams);
-      
-      return {
-        success: true,
-        order: {
-          orderId: order.orderId,
-          clientOrderId: order.clientOrderId,
-          symbol: order.symbol,
-          side: order.side,
-          type: order.type,
-          quantity: parseFloat(order.origQty),
-          price: parseFloat(order.price),
-          status: order.status,
-          transactTime: order.transactTime
+      // Try placing order with current time sync
+      try {
+        const order = await client.order(orderParams);
+        
+        return {
+          success: true,
+          order: {
+            orderId: order.orderId,
+            clientOrderId: order.clientOrderId,
+            symbol: order.symbol,
+            side: order.side,
+            type: order.type,
+            quantity: parseFloat(order.origQty),
+            price: parseFloat(order.price),
+            status: order.status,
+            transactTime: order.transactTime
+          }
+        };
+      } catch (timeError) {
+        // If it's a timestamp error, resync and retry once
+        if (timeError.message.includes('Timestamp') || timeError.message.includes('recvWindow')) {
+          console.log('🔄 Order timestamp error, resyncing time and retrying...');
+          this.lastSyncTime = 0; // Force resync
+          await this.syncServerTime();
+          
+          // Clear client cache to force new client with updated time
+          const cacheKey = `${userId}_${isTestMode}`;
+          this.clientCache.delete(cacheKey);
+          
+          // Get fresh client and retry
+          const freshClient = await this.getUserClient(userId, isTestMode);
+          const order = await freshClient.order(orderParams);
+          
+          return {
+            success: true,
+            order: {
+              orderId: order.orderId,
+              clientOrderId: order.clientOrderId,
+              symbol: order.symbol,
+              side: order.side,
+              type: order.type,
+              quantity: parseFloat(order.origQty),
+              price: parseFloat(order.price),
+              status: order.status,
+              transactTime: order.transactTime
+            }
+          };
         }
-      };
+        throw timeError; // Re-throw if not a timestamp error
+      }
     } catch (error) {
       return {
         success: false,
