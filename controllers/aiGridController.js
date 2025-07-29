@@ -85,13 +85,115 @@ class AIGridController {
         .limit(parseInt(limit))
         .skip(parseInt(offset));
 
-      // Get performance data for each bot
+      // Get performance data for each bot and calculate correct profit metrics
       const botsWithPerformance = await Promise.all(
         bots.map(async (bot) => {
           const performance = await BotPerformance.getByBot(bot._id);
+          
+          // If we have performance data, use it for the main bot fields
+          // Otherwise, calculate real-time performance using the same logic as realtime-stats
+          let calculatedPerformance = null;
+          
+          if (performance) {
+            calculatedPerformance = performance.summary;
+          } else {
+            // Fallback: Calculate basic performance from orders
+            try {
+              const filledOrders = await GridOrder.find({
+                bot_id: bot._id,
+                status: 'FILLED'
+              });
+              
+              if (filledOrders.length > 0) {
+                // Use simplified profit calculation for bot list
+                const buyOrders = filledOrders.filter(order => order.side === 'BUY');
+                const sellOrders = filledOrders.filter(order => order.side === 'SELL');
+                
+                let totalProfit = 0;
+                let totalTrades = 0;
+                let winningTrades = 0;
+                
+                // Simple FIFO pairing for performance overview
+                const pairedOrderIds = new Set();
+                
+                for (const sellOrder of sellOrders) {
+                  if (pairedOrderIds.has(sellOrder._id.toString())) continue;
+                  
+                  // Find best matching buy order
+                  const matchingBuyOrder = buyOrders.find(buyOrder => 
+                    !pairedOrderIds.has(buyOrder._id.toString()) &&
+                    buyOrder.filled_price < sellOrder.filled_price
+                  );
+                  
+                  if (matchingBuyOrder) {
+                    const profit = (sellOrder.filled_price - matchingBuyOrder.filled_price) * 
+                                 Math.min(matchingBuyOrder.filled_quantity, sellOrder.filled_quantity) -
+                                 (matchingBuyOrder.commission || 0) - (sellOrder.commission || 0);
+                    
+                    totalProfit += profit;
+                    totalTrades++;
+                    
+                    if (profit > 0) winningTrades++;
+                    
+                    pairedOrderIds.add(matchingBuyOrder._id.toString());
+                    pairedOrderIds.add(sellOrder._id.toString());
+                  }
+                }
+                
+                const winRate = totalTrades > 0 ? (winningTrades / totalTrades) * 100 : 0;
+                const pnlPercentage = (totalProfit / bot.investment_amount) * 100;
+                
+                calculatedPerformance = {
+                  bot_id: bot._id,
+                  symbol: bot.symbol,
+                  total_profit: totalProfit,
+                  total_trades: totalTrades,
+                  win_rate: winRate,
+                  pnl_percentage: pnlPercentage,
+                  max_drawdown: 0,
+                  profit_factor: 0,
+                  avg_trade_profit: totalTrades > 0 ? totalProfit / totalTrades : 0,
+                  best_trade: 0,
+                  worst_trade: 0,
+                  last_updated: new Date()
+                };
+              }
+            } catch (error) {
+              // If calculation fails, use zeros
+              calculatedPerformance = {
+                bot_id: bot._id,
+                symbol: bot.symbol,
+                total_profit: 0,
+                total_trades: 0,
+                win_rate: 0,
+                pnl_percentage: 0,
+                max_drawdown: 0,
+                profit_factor: 0,
+                avg_trade_profit: 0,
+                best_trade: 0,
+                worst_trade: 0,
+                last_updated: new Date()
+              };
+            }
+          }
+          
+          // Return bot summary with corrected performance data in main fields
           return {
-            ...bot.summary,
-            performance: performance ? performance.summary : null
+            id: bot._id,
+            symbol: bot.symbol,
+            investment_amount: bot.investment_amount,
+            status: bot.status,
+            stop_reason: bot.stop_reason,
+            // Use calculated performance data for main fields instead of bot.performance
+            total_profit: calculatedPerformance ? calculatedPerformance.total_profit : 0,
+            pnl_percentage: calculatedPerformance ? calculatedPerformance.pnl_percentage : 0,
+            total_trades: calculatedPerformance ? calculatedPerformance.total_trades : 0,
+            stop_loss_price: bot.risk_params.stop_loss_price,
+            created_at: bot.created_at,
+            updated_at: bot.updated_at,
+            stopped_at: bot.stopped_at,
+            // Keep the detailed performance object as well
+            performance: calculatedPerformance
           };
         })
       );
@@ -1020,102 +1122,145 @@ class AIGridController {
         filled: filledOrders.filter(order => order.side === 'SELL')
       };
 
-      // Calculate profit/loss using grid-based pairing
+      // Calculate profit/loss using proper order pairing
       let totalProfit = 0;
       let totalTrades = 0;
       let winningTrades = 0;
       const tradingPairs = [];
+      const pairedOrderIds = new Set(); // Track paired orders to avoid double counting
 
-      // Group filled orders by grid level for proper pairing
-      const filledBuysByLevel = {};
-      const filledSellsByLevel = {};
+      // Create arrays of buy and sell orders sorted by fill time
+      const sortedBuyOrders = [...buyOrders.filled].sort((a, b) => new Date(a.filled_at) - new Date(b.filled_at));
+      const sortedSellOrders = [...sellOrders.filled].sort((a, b) => new Date(a.filled_at) - new Date(b.filled_at));
 
-      buyOrders.filled.forEach(order => {
-        if (!filledBuysByLevel[order.grid_level]) {
-          filledBuysByLevel[order.grid_level] = [];
-        }
-        filledBuysByLevel[order.grid_level].push(order);
-      });
-
-      sellOrders.filled.forEach(order => {
-        if (!filledSellsByLevel[order.grid_level]) {
-          filledSellsByLevel[order.grid_level] = [];
-        }
-        filledSellsByLevel[order.grid_level].push(order);
-      });
-
-      // Calculate profits from completed buy-sell pairs
-      Object.keys(filledBuysByLevel).forEach(level => {
-        const buyOrdersAtLevel = filledBuysByLevel[level];
-        
-        // Find sell orders at higher levels
-        Object.keys(filledSellsByLevel).forEach(sellLevel => {
-          if (parseInt(sellLevel) > parseInt(level)) {
-            const sellOrdersAtLevel = filledSellsByLevel[sellLevel];
+      // Method 1: Try to pair orders by parent_order_id first (for proper grid relationships)
+      sellOrders.filled.forEach(sellOrder => {
+        if (sellOrder.parent_order_id && !pairedOrderIds.has(sellOrder._id.toString())) {
+          const parentBuyOrder = buyOrders.filled.find(buyOrder => 
+            buyOrder._id.toString() === sellOrder.parent_order_id.toString() && 
+            !pairedOrderIds.has(buyOrder._id.toString())
+          );
+          
+          if (parentBuyOrder) {
+            const profit = (sellOrder.filled_price - parentBuyOrder.filled_price) * Math.min(parentBuyOrder.filled_quantity, sellOrder.filled_quantity) 
+                         - (parentBuyOrder.commission || 0) - (sellOrder.commission || 0);
             
-            // Pair buy and sell orders
-            const pairsCount = Math.min(buyOrdersAtLevel.length, sellOrdersAtLevel.length);
+            totalProfit += profit;
+            totalTrades++;
             
-            for (let i = 0; i < pairsCount; i++) {
-              const buyOrder = buyOrdersAtLevel[i];
-              const sellOrder = sellOrdersAtLevel[i];
-              
-              const profit = (sellOrder.filled_price - buyOrder.filled_price) * buyOrder.filled_quantity 
-                           - buyOrder.commission - sellOrder.commission;
-              
-              totalProfit += profit;
-              totalTrades++;
-              
-              if (profit > 0) {
-                winningTrades++;
-              }
-              
-              tradingPairs.push({
-                buy_order: {
-                  id: buyOrder._id,
-                  price: buyOrder.filled_price,
-                  quantity: buyOrder.filled_quantity,
-                  grid_level: buyOrder.grid_level,
-                  filled_at: buyOrder.filled_at
-                },
-                sell_order: {
-                  id: sellOrder._id,
-                  price: sellOrder.filled_price,
-                  quantity: sellOrder.filled_quantity,
-                  grid_level: sellOrder.grid_level,
-                  filled_at: sellOrder.filled_at
-                },
-                profit: profit,
-                profit_percentage: ((profit / (buyOrder.filled_price * buyOrder.filled_quantity)) * 100)
-              });
+            if (profit > 0) {
+              winningTrades++;
             }
+            
+            tradingPairs.push({
+              buy_order: {
+                id: parentBuyOrder._id,
+                price: parentBuyOrder.filled_price,
+                quantity: parentBuyOrder.filled_quantity,
+                grid_level: parentBuyOrder.grid_level,
+                filled_at: parentBuyOrder.filled_at
+              },
+              sell_order: {
+                id: sellOrder._id,
+                price: sellOrder.filled_price,
+                quantity: sellOrder.filled_quantity,
+                grid_level: sellOrder.grid_level,
+                filled_at: sellOrder.filled_at
+              },
+              profit: profit,
+              profit_percentage: ((profit / (parentBuyOrder.filled_price * Math.min(parentBuyOrder.filled_quantity, sellOrder.filled_quantity))) * 100),
+              pairing_method: 'parent_order'
+            });
+            
+            // Mark both orders as paired
+            pairedOrderIds.add(parentBuyOrder._id.toString());
+            pairedOrderIds.add(sellOrder._id.toString());
           }
-        });
+        }
       });
 
-      // Calculate unrealized P&L for filled orders without pairs
+      // Method 2: Pair remaining orders using FIFO (First In, First Out) method
+      // This simulates realistic trading where sells are matched with earliest buys
+      const unpairedBuyOrders = sortedBuyOrders.filter(order => !pairedOrderIds.has(order._id.toString()));
+      const unpairedSellOrders = sortedSellOrders.filter(order => !pairedOrderIds.has(order._id.toString()));
+
+      let buyIndex = 0;
+      let sellIndex = 0;
+
+      while (buyIndex < unpairedBuyOrders.length && sellIndex < unpairedSellOrders.length) {
+        const buyOrder = unpairedBuyOrders[buyIndex];
+        const sellOrder = unpairedSellOrders[sellIndex];
+        
+        // Only pair if sell price is higher than buy price (profitable)
+        if (sellOrder.filled_price > buyOrder.filled_price) {
+          const quantity = Math.min(buyOrder.filled_quantity, sellOrder.filled_quantity);
+          const profit = (sellOrder.filled_price - buyOrder.filled_price) * quantity 
+                       - (buyOrder.commission || 0) - (sellOrder.commission || 0);
+          
+          totalProfit += profit;
+          totalTrades++;
+          
+          if (profit > 0) {
+            winningTrades++;
+          }
+          
+          tradingPairs.push({
+            buy_order: {
+              id: buyOrder._id,
+              price: buyOrder.filled_price,
+              quantity: buyOrder.filled_quantity,
+              grid_level: buyOrder.grid_level,
+              filled_at: buyOrder.filled_at
+            },
+            sell_order: {
+              id: sellOrder._id,
+              price: sellOrder.filled_price,
+              quantity: sellOrder.filled_quantity,
+              grid_level: sellOrder.grid_level,
+              filled_at: sellOrder.filled_at
+            },
+            profit: profit,
+            profit_percentage: ((profit / (buyOrder.filled_price * quantity)) * 100),
+            pairing_method: 'fifo'
+          });
+          
+          // Mark both orders as paired
+          pairedOrderIds.add(buyOrder._id.toString());
+          pairedOrderIds.add(sellOrder._id.toString());
+        }
+        
+        // Move to next orders
+        buyIndex++;
+        sellIndex++;
+      }
+
+      // Calculate unrealized P&L for truly unpaired orders only
       let unrealizedPnL = 0;
       const unpairedOrders = [];
 
-      // Check unpaired buy orders (potential profit if price goes up)
-      buyOrders.filled.forEach(order => {
-        const unrealizedProfit = (currentPrice - order.filled_price) * order.filled_quantity - order.commission;
+      // Check unpaired buy orders (holding positions)
+      const trulyUnpairedBuyOrders = buyOrders.filled.filter(order => !pairedOrderIds.has(order._id.toString()));
+      trulyUnpairedBuyOrders.forEach(order => {
+        const unrealizedProfit = (currentPrice - order.filled_price) * order.filled_quantity - (order.commission || 0);
         unrealizedPnL += unrealizedProfit;
         unpairedOrders.push({
           ...order.toJSON(),
           unrealized_pnl: unrealizedProfit,
-          unrealized_pnl_percentage: ((unrealizedProfit / (order.filled_price * order.filled_quantity)) * 100)
+          unrealized_pnl_percentage: ((unrealizedProfit / (order.filled_price * order.filled_quantity)) * 100),
+          pairing_status: 'unpaired_buy'
         });
       });
 
-      // Check unpaired sell orders (potential loss if price goes up)
-      sellOrders.filled.forEach(order => {
-        const unrealizedProfit = (order.filled_price - currentPrice) * order.filled_quantity - order.commission;
+      // Check unpaired sell orders (short positions - rare in grid trading)
+      const trulyUnpairedSellOrders = sellOrders.filled.filter(order => !pairedOrderIds.has(order._id.toString()));
+      trulyUnpairedSellOrders.forEach(order => {
+        const unrealizedProfit = (order.filled_price - currentPrice) * order.filled_quantity - (order.commission || 0);
         unrealizedPnL += unrealizedProfit;
         unpairedOrders.push({
           ...order.toJSON(),
           unrealized_pnl: unrealizedProfit,
-          unrealized_pnl_percentage: ((unrealizedProfit / (order.filled_price * order.filled_quantity)) * 100)
+          unrealized_pnl_percentage: ((unrealizedProfit / (order.filled_price * order.filled_quantity)) * 100),
+          pairing_status: 'unpaired_sell'
         });
       });
 
@@ -1234,7 +1379,17 @@ class AIGridController {
             winning_trades: winningTrades,
             losing_trades: totalTrades - winningTrades,
             win_rate: winRate,
-            grid_utilization: gridUtilization
+            grid_utilization: gridUtilization,
+            // Additional debugging info
+            pairing_stats: {
+              total_buy_orders: buyOrders.filled.length,
+              total_sell_orders: sellOrders.filled.length,
+              paired_orders: pairedOrderIds.size,
+              unpaired_buy_orders: trulyUnpairedBuyOrders.length,
+              unpaired_sell_orders: trulyUnpairedSellOrders.length,
+              parent_order_pairs: tradingPairs.filter(p => p.pairing_method === 'parent_order').length,
+              fifo_pairs: tradingPairs.filter(p => p.pairing_method === 'fifo').length
+            }
           },
           orders: {
             pending: {
