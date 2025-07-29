@@ -87,7 +87,7 @@ app.use((req, res, next) => {
 app.get('/health', (req, res) => {
   res.status(200).json({
     success: true,
-    message: 'Hello, My name is Zubair dev ops',
+    message: 'Hello, New StopLoss change',
     timestamp: new Date().toISOString(),
     environment: process.env.NODE_ENV || 'development'
   });
