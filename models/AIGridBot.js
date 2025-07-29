@@ -108,6 +108,11 @@ const aiGridBotSchema = new mongoose.Schema({
   },
   stopped_at: {
     type: Date
+  },
+  stop_reason: {
+    type: String,
+    enum: ['USER_STOPPED', 'STOP_LOSS_TRIGGERED', 'ERROR', 'TAKE_PROFIT_REACHED'],
+    default: 'USER_STOPPED'
   }
 }, {
   timestamps: true
@@ -154,11 +159,14 @@ aiGridBotSchema.virtual('summary').get(function() {
     symbol: this.symbol,
     investment_amount: this.investment_amount,
     status: this.status,
+    stop_reason: this.stop_reason,
     total_profit: this.performance.total_profit,
     pnl_percentage: this.performance.pnl_percentage,
     total_trades: this.performance.total_trades,
+    stop_loss_price: this.risk_params.stop_loss_price,
     created_at: this.created_at,
-    updated_at: this.updated_at
+    updated_at: this.updated_at,
+    stopped_at: this.stopped_at
   };
 });
 

@@ -50,6 +50,16 @@ const gridOrderSchema = new mongoose.Schema({
     type: Number,
     required: true
   },
+  order_type: {
+    type: String,
+    enum: ['GRID_BUY', 'GRID_SELL', 'MARKET_ENTRY', 'MARKET_EXIT', 'STOP_LOSS', 'LIQUIDATION'],
+    default: 'GRID_BUY'
+  },
+  parent_order_id: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'GridOrder',
+    index: true
+  },
   filled_quantity: {
     type: Number,
     default: 0
@@ -181,6 +191,8 @@ gridOrderSchema.virtual('summary').get(function() {
     quantity: this.quantity,
     status: this.status,
     grid_level: this.grid_level,
+    order_type: this.order_type,
+    parent_order_id: this.parent_order_id,
     filled_quantity: this.filled_quantity,
     filled_price: this.filled_price,
     profit_loss: this.profit_loss,

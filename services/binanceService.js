@@ -395,6 +395,159 @@ class BinanceService {
     }
   }
 
+  // Place market order for immediate execution
+  async placeMarketOrder(userId, symbol, side, quantity, isTestMode = true, options = {}) {
+    try {
+      const client = await this.getUserClient(userId, isTestMode);
+      if (!client) throw new Error('Binance client not initialized');
+
+      const orderParams = {
+        symbol: symbol.toUpperCase(),
+        side: side.toUpperCase(),
+        type: 'MARKET',
+        quantity: quantity.toString(),
+        ...options
+      };
+
+      // Try placing order with current time sync
+      try {
+        const order = await client.order(orderParams);
+        
+        return {
+          success: true,
+          order: {
+            orderId: order.orderId,
+            clientOrderId: order.clientOrderId,
+            symbol: order.symbol,
+            side: order.side,
+            type: order.type,
+            quantity: parseFloat(order.origQty),
+            executedQty: parseFloat(order.executedQty),
+            cummulativeQuoteQty: parseFloat(order.cummulativeQuoteQty),
+            status: order.status,
+            transactTime: order.transactTime,
+            fills: order.fills || []
+          }
+        };
+      } catch (timeError) {
+        // If it's a timestamp error, resync and retry once
+        if (timeError.message.includes('Timestamp') || timeError.message.includes('recvWindow')) {
+          console.log('🔄 Market order timestamp error, resyncing time and retrying...');
+          this.lastSyncTime = 0; // Force resync
+          await this.syncServerTime();
+          
+          // Clear client cache to force new client with updated time
+          const cacheKey = `${userId}_${isTestMode}`;
+          this.clientCache.delete(cacheKey);
+          
+          // Get fresh client and retry
+          const freshClient = await this.getUserClient(userId, isTestMode);
+          const order = await freshClient.order(orderParams);
+          
+          return {
+            success: true,
+            order: {
+              orderId: order.orderId,
+              clientOrderId: order.clientOrderId,
+              symbol: order.symbol,
+              side: order.side,
+              type: order.type,
+              quantity: parseFloat(order.origQty),
+              executedQty: parseFloat(order.executedQty),
+              cummulativeQuoteQty: parseFloat(order.cummulativeQuoteQty),
+              status: order.status,
+              transactTime: order.transactTime,
+              fills: order.fills || []
+            }
+          };
+        }
+        throw timeError; // Re-throw if not a timestamp error
+      }
+    } catch (error) {
+      return {
+        success: false,
+        error: error.message
+      };
+    }
+  }
+
+  // Place stop loss order (STOP_LOSS_LIMIT)
+  async placeStopLossOrder(userId, symbol, quantity, stopPrice, limitPrice, isTestMode = true, options = {}) {
+    try {
+      const client = await this.getUserClient(userId, isTestMode);
+      if (!client) throw new Error('Binance client not initialized');
+
+      const orderParams = {
+        symbol: symbol.toUpperCase(),
+        side: 'SELL',
+        type: 'STOP_LOSS_LIMIT',
+        timeInForce: 'GTC',
+        quantity: quantity.toString(),
+        stopPrice: stopPrice.toString(),
+        price: limitPrice.toString(),
+        ...options
+      };
+
+      // Try placing order with current time sync
+      try {
+        const order = await client.order(orderParams);
+        
+        return {
+          success: true,
+          order: {
+            orderId: order.orderId,
+            clientOrderId: order.clientOrderId,
+            symbol: order.symbol,
+            side: order.side,
+            type: order.type,
+            quantity: parseFloat(order.origQty),
+            stopPrice: parseFloat(order.stopPrice),
+            price: parseFloat(order.price),
+            status: order.status,
+            transactTime: order.transactTime
+          }
+        };
+      } catch (timeError) {
+        // If it's a timestamp error, resync and retry once
+        if (timeError.message.includes('Timestamp') || timeError.message.includes('recvWindow')) {
+          console.log('🔄 Stop loss order timestamp error, resyncing time and retrying...');
+          this.lastSyncTime = 0; // Force resync
+          await this.syncServerTime();
+          
+          // Clear client cache to force new client with updated time
+          const cacheKey = `${userId}_${isTestMode}`;
+          this.clientCache.delete(cacheKey);
+          
+          // Get fresh client and retry
+          const freshClient = await this.getUserClient(userId, isTestMode);
+          const order = await freshClient.order(orderParams);
+          
+          return {
+            success: true,
+            order: {
+              orderId: order.orderId,
+              clientOrderId: order.clientOrderId,
+              symbol: order.symbol,
+              side: order.side,
+              type: order.type,
+              quantity: parseFloat(order.origQty),
+              stopPrice: parseFloat(order.stopPrice),
+              price: parseFloat(order.price),
+              status: order.status,
+              transactTime: order.transactTime
+            }
+          };
+        }
+        throw timeError; // Re-throw if not a timestamp error
+      }
+    } catch (error) {
+      return {
+        success: false,
+        error: error.message
+      };
+    }
+  }
+
   // Cancel an order
   async cancelOrder(userId, orderParams, isTestMode = true) {
     try {

@@ -292,13 +292,123 @@ class GridBotEngine {
         throw new Error('No valid buy levels found after filtering. Grid may be too narrow or current price too close to boundaries.');
       }
       
-      // Recalculate order size based on actual orders to be placed
-      // Using 95% instead of 90% for higher capital efficiency
+      // Calculate order sizes accounting for immediate market buy order
+      // Reserve 20% for immediate market buy, 75% for grid orders (total 95%)
       const usableAmount = bot.investment_amount * 0.95;
-      const actualOrderSize = usableAmount / filteredBuyLevels.length;
-      const orderSizeInBase = actualOrderSize / grid_params.current_price;
+      const marketBuyAmount = usableAmount * 0.2; // 20% for immediate market buy
+      const gridOrdersAmount = usableAmount * 0.8; // 80% for grid orders
       
-      console.log(`Debug: Placing ${filteredBuyLevels.length} BUY orders, ${orderSizeInBase} XRP each, ${actualOrderSize} USDT each`);
+      const actualOrderSize = gridOrdersAmount / filteredBuyLevels.length;
+      const orderSizeInBase = actualOrderSize / grid_params.current_price;
+      const marketBuyQuantity = marketBuyAmount / grid_params.current_price;
+      
+      console.log(`Debug: Market buy: ${marketBuyQuantity} base, ${marketBuyAmount} USDT`);
+      console.log(`Debug: Grid orders: ${filteredBuyLevels.length} BUY orders, ${orderSizeInBase} base each, ${actualOrderSize} USDT each`);
+
+      // Place immediate market buy order first
+      try {
+        const shortId = bot._id.toString().slice(-8);
+        const timestamp = Date.now().toString().slice(-6);
+        const marketClientOrderId = `gm_${shortId}_${timestamp}`;
+        
+        // Get symbol info for quantity formatting
+        const symbolInfo = await binanceService.getSymbolInfo(bot.symbol);
+        const formattedMarketQuantity = symbolInfo.success ? 
+          binanceService.formatQuantity(marketBuyQuantity, symbolInfo.stepSize) : 
+          parseFloat(marketBuyQuantity.toFixed(6));
+        
+        console.log(`🚀 Placing immediate market buy order: ${formattedMarketQuantity} ${bot.symbol}`);
+        
+        const marketOrderResult = await binanceService.placeMarketOrder(
+          userId,
+          bot.symbol,
+          'BUY',
+          formattedMarketQuantity,
+          isTestMode,
+          { newClientOrderId: marketClientOrderId }
+        );
+
+        if (marketOrderResult.success) {
+          // Calculate average fill price from fills
+          let avgFillPrice = grid_params.current_price; // fallback
+          if (marketOrderResult.order.fills && marketOrderResult.order.fills.length > 0) {
+            const totalQty = marketOrderResult.order.fills.reduce((sum, fill) => sum + parseFloat(fill.qty), 0);
+            const totalCost = marketOrderResult.order.fills.reduce((sum, fill) => sum + (parseFloat(fill.price) * parseFloat(fill.qty)), 0);
+            avgFillPrice = totalCost / totalQty;
+          }
+
+          // Save market order to database
+          const marketGridOrder = new GridOrder({
+            bot_id: bot._id,
+            binance_order_id: marketOrderResult.order.orderId,
+            client_order_id: marketOrderResult.order.clientOrderId,
+            symbol: bot.symbol,
+            price: avgFillPrice,
+            quantity: marketOrderResult.order.executedQty,
+            filled_price: avgFillPrice,
+            filled_quantity: marketOrderResult.order.executedQty,
+            side: 'BUY',
+            status: 'FILLED',
+            grid_level: -1, // Special level for market order
+            order_type: 'MARKET_ENTRY',
+            created_at: new Date(),
+            filled_at: new Date()
+          });
+
+          await marketGridOrder.save();
+          orders.push(marketGridOrder);
+
+          // Immediately place corresponding sell order above current price
+          const sellPrice = avgFillPrice * (1 + (grid_params.grid_spacing / grid_params.current_price));
+          const sellClientOrderId = `gs_${shortId}_mkt_${timestamp}`;
+          
+          const formattedSellPrice = symbolInfo.success ? 
+            binanceService.formatPrice(sellPrice, symbolInfo.tickSize) : 
+            parseFloat(sellPrice.toFixed(2));
+          
+          console.log(`📈 Placing immediate sell order at: ${formattedSellPrice}`);
+          
+          const sellOrderResult = await binanceService.placeLimitOrder(
+            userId,
+            bot.symbol,
+            'SELL',
+            formattedMarketQuantity,
+            formattedSellPrice,
+            isTestMode,
+            { newClientOrderId: sellClientOrderId }
+          );
+
+          if (sellOrderResult.success) {
+            // Save sell order to database
+            const sellGridOrder = new GridOrder({
+              bot_id: bot._id,
+              binance_order_id: sellOrderResult.order.orderId,
+              client_order_id: sellOrderResult.order.clientOrderId,
+              symbol: bot.symbol,
+              price: sellPrice,
+              quantity: formattedMarketQuantity,
+              side: 'SELL',
+              status: 'NEW',
+              grid_level: -2, // Special level for market sell order
+              order_type: 'MARKET_EXIT',
+              created_at: new Date(),
+              parent_order_id: marketGridOrder._id // Link to parent buy order
+            });
+
+            await sellGridOrder.save();
+            orders.push(sellGridOrder);
+            
+            console.log(`✅ Market buy-sell pair created successfully`);
+          } else {
+            console.error(`❌ Failed to place sell order: ${sellOrderResult.error}`);
+          }
+        } else {
+          console.error(`❌ Failed to place market buy order: ${marketOrderResult.error}`);
+        }
+      } catch (marketOrderError) {
+        console.error(`❌ Market order error: ${marketOrderError.message}`);
+        // Continue with grid orders even if market order fails
+      }
       
       for (let i = 0; i < filteredBuyLevels.length; i++) {
         const level = filteredBuyLevels[i];
@@ -354,6 +464,7 @@ class GridBotEngine {
               side: side,
               status: 'NEW',
               grid_level: i,
+              order_type: 'GRID_BUY',
               created_at: new Date()
             });
 
@@ -368,6 +479,65 @@ class GridBotEngine {
             throw orderError;
           }
         }
+      }
+
+      // Place stop loss order below the grid range
+      try {
+        const stopLossPrice = grid_params.stop_loss_price || (grid_params.lower_price * 0.98); // 2% below lowest grid level
+        const stopLossClientOrderId = `gsl_${bot._id.toString().slice(-8)}_${Date.now().toString().slice(-6)}`;
+        
+        console.log(`🛑 Placing stop loss order at: ${stopLossPrice}`);
+        
+        // Calculate total potential holdings (market buy + any filled grid orders)
+        // For now, use a conservative estimate - we'll update this dynamically
+        const estimatedHoldings = marketBuyQuantity + (orderSizeInBase * 2); // Market buy + potential 2 grid fills
+        
+        const symbolInfo = await binanceService.getSymbolInfo(bot.symbol);
+        const formattedStopLossPrice = symbolInfo.success ? 
+          binanceService.formatPrice(stopLossPrice, symbolInfo.tickSize) : 
+          parseFloat(stopLossPrice.toFixed(2));
+        
+        const formattedStopLossQuantity = symbolInfo.success ? 
+          binanceService.formatQuantity(estimatedHoldings, symbolInfo.stepSize) : 
+          parseFloat(estimatedHoldings.toFixed(6));
+
+        // Place stop loss as a stop-limit order (converts to limit when triggered)
+        const stopLossResult = await binanceService.placeStopLossOrder(
+          userId,
+          bot.symbol,
+          formattedStopLossQuantity,
+          formattedStopLossPrice,
+          formattedStopLossPrice, // Stop price same as limit price
+          isTestMode,
+          { newClientOrderId: stopLossClientOrderId }
+        );
+
+        if (stopLossResult.success) {
+          // Save stop loss order to database
+          const stopLossOrder = new GridOrder({
+            bot_id: bot._id,
+            binance_order_id: stopLossResult.order.orderId,
+            client_order_id: stopLossResult.order.clientOrderId,
+            symbol: bot.symbol,
+            price: stopLossPrice,
+            quantity: estimatedHoldings,
+            side: 'SELL',
+            status: 'NEW',
+            grid_level: -999, // Special level for stop loss
+            order_type: 'STOP_LOSS',
+            created_at: new Date()
+          });
+
+          await stopLossOrder.save();
+          orders.push(stopLossOrder);
+          
+          console.log(`✅ Stop loss order placed successfully at ${formattedStopLossPrice}`);
+        } else {
+          console.error(`❌ Failed to place stop loss order: ${stopLossResult.error}`);
+        }
+      } catch (stopLossError) {
+        console.error(`❌ Stop loss order error: ${stopLossError.message}`);
+        // Continue even if stop loss fails - not critical for basic operation
       }
 
       return orders;
@@ -517,6 +687,242 @@ class GridBotEngine {
       }
     } catch (error) {
       // Error handling order update
+    }
+  }
+
+  // Handle filled order execution
+  async handleFilledOrder(bot, orderData) {
+    try {
+      // Find the order in our database
+      const gridOrder = await GridOrder.findOne({
+        bot_id: bot._id,
+        binance_order_id: orderData.orderId
+      });
+
+      if (!gridOrder) {
+        console.log(`⚠️ Grid order not found for Binance order ID: ${orderData.orderId}`);
+        return;
+      }
+
+      // Update order with fill data
+      await gridOrder.markFilled({
+        quantity: parseFloat(orderData.executedQuantity),
+        price: parseFloat(orderData.averagePrice || orderData.price),
+        commission: parseFloat(orderData.commission || 0),
+        commissionAsset: orderData.commissionAsset || ''
+      });
+
+      console.log(`✅ Order filled: ${gridOrder.side} ${gridOrder.filled_quantity} ${bot.symbol} at ${gridOrder.filled_price}`);
+
+      // Check if this is a stop loss order
+      if (gridOrder.order_type === 'STOP_LOSS') {
+        console.log(`🛑 STOP LOSS TRIGGERED for bot ${bot._id}!`);
+        await this.executeStopLossProtocol(bot, gridOrder);
+        return;
+      }
+
+      // Handle normal grid order fills
+      if (gridOrder.side === 'BUY') {
+        // Place corresponding sell order above this buy price
+        await this.placeBuyFollowUpSellOrder(bot, gridOrder);
+      } else if (gridOrder.side === 'SELL') {
+        // Place corresponding buy order below this sell price
+        await this.placeSellFollowUpBuyOrder(bot, gridOrder);
+      }
+
+    } catch (error) {
+      console.error(`❌ Error handling filled order: ${error.message}`);
+    }
+  }
+
+  // Execute stop loss protocol - cancel all orders and liquidate holdings
+  async executeStopLossProtocol(bot, stopLossOrder) {
+    try {
+      console.log(`🚨 EXECUTING STOP LOSS PROTOCOL for bot ${bot._id}`);
+      
+      // Set test mode for this bot
+      binanceService.setTestMode(bot.test_mode);
+
+      // 1. Cancel all open orders for this bot
+      const openOrders = await GridOrder.find({
+        bot_id: bot._id,
+        status: { $in: ['NEW', 'PARTIALLY_FILLED'] }
+      });
+
+      console.log(`📋 Cancelling ${openOrders.length} open orders...`);
+      
+      let cancelledCount = 0;
+      for (const order of openOrders) {
+        try {
+          const cancelResult = await binanceService.cancelOrder(
+            bot.user_id,
+            { symbol: bot.symbol, orderId: order.binance_order_id },
+            bot.test_mode
+          );
+
+          if (cancelResult.success) {
+            order.status = 'CANCELLED';
+            await order.save();
+            cancelledCount++;
+          }
+        } catch (cancelError) {
+          console.error(`❌ Failed to cancel order ${order.binance_order_id}: ${cancelError.message}`);
+        }
+      }
+
+      console.log(`✅ Cancelled ${cancelledCount} orders`);
+
+      // 2. Get current holdings and liquidate any remaining base asset
+      await this.liquidateRemainingHoldings(bot);
+
+      // 3. Update bot status to stopped with stop loss reason
+      bot.status = 'stopped';
+      bot.stop_reason = 'STOP_LOSS_TRIGGERED';
+      bot.stopped_at = new Date();
+      await bot.save();
+
+      // 4. Remove from active bots
+      this.activeBots.delete(bot._id.toString());
+
+      // 5. Stop streams for this bot
+      this.stopPriceStream(bot.symbol, bot.user_id);
+      
+      // Check if user has other active bots before stopping user data stream
+      const userHasOtherBots = Array.from(this.activeBots.values()).some(
+        ({ bot: otherBot }) => otherBot.user_id.toString() === bot.user_id.toString()
+      );
+      
+      if (!userHasOtherBots) {
+        this.stopUserDataStream(bot.user_id);
+      }
+
+      // 6. Update performance record
+      await this.updateBotPerformanceAfterStopLoss(bot);
+
+      console.log(`🛑 Stop loss protocol completed for bot ${bot._id}`);
+
+    } catch (error) {
+      console.error(`❌ Error executing stop loss protocol: ${error.message}`);
+    }
+  }
+
+  // Liquidate remaining holdings by market selling base asset
+  async liquidateRemainingHoldings(bot) {
+    try {
+      console.log(`💰 Checking holdings to liquidate for ${bot.symbol}...`);
+      
+      // Get account balance
+      const client = await binanceService.getUserClient(bot.user_id, bot.test_mode);
+      if (!client) {
+        console.error('❌ Could not get user client for liquidation');
+        return;
+      }
+
+      const account = await client.accountInfo();
+      const baseAsset = bot.symbol.replace('USDT', '');
+      const baseBalance = account.balances.find(b => b.asset === baseAsset);
+      
+      if (!baseBalance || parseFloat(baseBalance.free) <= 0) {
+        console.log(`✅ No ${baseAsset} holdings to liquidate`);
+        return;
+      }
+
+      const availableQuantity = parseFloat(baseBalance.free);
+      console.log(`💸 Liquidating ${availableQuantity} ${baseAsset}...`);
+
+      // Get symbol info for quantity formatting
+      const symbolInfo = await binanceService.getSymbolInfo(bot.symbol);
+      const formattedQuantity = symbolInfo.success ? 
+        binanceService.formatQuantity(availableQuantity, symbolInfo.stepSize) : 
+        parseFloat(availableQuantity.toFixed(6));
+
+      // Place market sell order to liquidate
+      const liquidationClientOrderId = `liq_${bot._id.toString().slice(-8)}_${Date.now().toString().slice(-6)}`;
+      
+      const marketSellResult = await binanceService.placeMarketOrder(
+        bot.user_id,
+        bot.symbol,
+        'SELL',
+        formattedQuantity,
+        bot.test_mode,
+        { newClientOrderId: liquidationClientOrderId }
+      );
+
+      if (marketSellResult.success) {
+        // Save liquidation order to database
+        const liquidationOrder = new GridOrder({
+          bot_id: bot._id,
+          binance_order_id: marketSellResult.order.orderId,
+          client_order_id: marketSellResult.order.clientOrderId,
+          symbol: bot.symbol,
+          price: 0, // Market order, price determined by fills
+          quantity: availableQuantity,
+          filled_price: 0, // Will be calculated from fills
+          filled_quantity: marketSellResult.order.executedQty,
+          side: 'SELL',
+          status: 'FILLED',
+          grid_level: -998, // Special level for liquidation
+          order_type: 'LIQUIDATION',
+          created_at: new Date(),
+          filled_at: new Date()
+        });
+
+        // Calculate average fill price if fills available
+        if (marketSellResult.order.fills && marketSellResult.order.fills.length > 0) {
+          const totalQty = marketSellResult.order.fills.reduce((sum, fill) => sum + parseFloat(fill.qty), 0);
+          const totalCost = marketSellResult.order.fills.reduce((sum, fill) => sum + (parseFloat(fill.price) * parseFloat(fill.qty)), 0);
+          liquidationOrder.filled_price = totalCost / totalQty;
+          liquidationOrder.price = liquidationOrder.filled_price;
+        }
+
+        await liquidationOrder.save();
+        console.log(`✅ Liquidated ${formattedQuantity} ${baseAsset} successfully`);
+      } else {
+        console.error(`❌ Failed to liquidate holdings: ${marketSellResult.error}`);
+      }
+
+    } catch (error) {
+      console.error(`❌ Error liquidating holdings: ${error.message}`);
+    }
+  }
+
+  // Update bot performance after stop loss
+  async updateBotPerformanceAfterStopLoss(bot) {
+    try {
+      // Calculate final P&L including stop loss
+      const allOrders = await GridOrder.find({ bot_id: bot._id, status: 'FILLED' });
+      
+      let totalBuyCost = 0;
+      let totalSellRevenue = 0;
+      let totalCommission = 0;
+
+      for (const order of allOrders) {
+        const orderValue = order.filled_price * order.filled_quantity;
+        totalCommission += order.commission;
+
+        if (order.side === 'BUY') {
+          totalBuyCost += orderValue;
+        } else {
+          totalSellRevenue += orderValue;
+        }
+      }
+
+      const netPnL = totalSellRevenue - totalBuyCost - totalCommission;
+      const pnlPercentage = (netPnL / bot.investment_amount) * 100;
+
+      // Update performance record
+      await BotPerformance.createOrUpdate(bot._id, bot.symbol, {
+        total_profit: netPnL,
+        total_trades: allOrders.length,
+        win_rate: 0, // Will be calculated elsewhere
+        pnl_percentage: pnlPercentage,
+        final_status: 'STOP_LOSS_TRIGGERED'
+      });
+
+      console.log(`📊 Final P&L: ${netPnL.toFixed(4)} USDT (${pnlPercentage.toFixed(2)}%)`);
+
+    } catch (error) {
+      console.error(`❌ Error updating performance after stop loss: ${error.message}`);
     }
   }
 
