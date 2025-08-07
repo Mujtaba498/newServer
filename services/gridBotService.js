@@ -746,8 +746,10 @@ class GridBotService {
       const bot = await GridBot.findById(botId);
       if (!bot) throw new Error('Bot not found');
 
-      const currentPrice = await this.binance.getSymbolPrice(bot.symbol);
-      const symbolInfo = await this.binance.getSymbolInfo(bot.symbol);
+       const userBinance = await this.getUserBinanceService(bot.userId);
+      
+      const currentPrice = await userBinance.getSymbolPrice(bot.symbol);
+      const symbolInfo = await userBinance.getSymbolInfo(bot.symbol);
       
       // Calculate unrealized PnL
       let unrealizedPnL = 0;
@@ -792,8 +794,11 @@ class GridBotService {
       const bot = await GridBot.findById(botId);
       if (!bot) throw new Error('Bot not found');
 
-      const currentPrice = await this.binance.getSymbolPrice(bot.symbol);
-      const symbolInfo = await this.binance.getSymbolInfo(bot.symbol);
+        const userBinance = await this.getUserBinanceService(bot.userId);
+      
+      const currentPrice = await userBinance.getSymbolPrice(bot.symbol);
+      const symbolInfo = await userBinance.getSymbolInfo(bot.symbol);
+      
       
       // Separate orders by status and type
       const filledOrders = bot.orders.filter(o => o.status === 'FILLED');
