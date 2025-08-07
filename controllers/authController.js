@@ -1,262 +1,325 @@
-import User from '../models/User.js';
-import OTP from '../models/OTP.js';
-import emailService from '../services/emailService.js';
-import { generateToken } from '../config/jwt.js';
-import { validationResult } from 'express-validator';
+const User = require('../models/User');
+const { generateToken } = require('../utils/jwt');
+const { sendOTPEmail, sendWelcomeEmail } = require('../services/emailService');
 
-class AuthController {
-  // Send OTP for unified signup/login
-  async sendOTP(req, res) {
-    try {
-      // Check for validation errors
-      const errors = validationResult(req);
-      if (!errors.isEmpty()) {
-        return res.status(400).json({
-          success: false,
-          message: 'Validation failed',
-          errors: errors.array()
-        });
-      }
+const register = async (req, res) => {
+  try {
+    const { name, email, password, role = 'user' } = req.body;
 
-      const { email, name } = req.body;
-
-      // Check if user exists
-      const existingUser = await User.findByEmail(email);
-      
-      // Determine purpose automatically
-      const purpose = existingUser ? 'login' : 'signup';
-      
-      // Generate and save OTP
-      const otp = await OTP.createOTP(email, purpose);
-      
-      // Send OTP email
-      const userName = name || existingUser?.name || 'User';
-      await emailService.sendOTP(email, otp.code, userName);
-
-      res.status(200).json({
-        success: true,
-        message: `OTP sent successfully to ${email}`,
-        data: {
-          email,
-          expiresAt: otp.expiresAt,
-          purpose,
-          isNewUser: !existingUser
-        }
-      });
-
-    } catch (error) {
-      res.status(500).json({
+    // Validate role
+    if (role && !['user', 'admin'].includes(role)) {
+      return res.status(400).json({
         success: false,
-        message: 'Failed to send OTP. Please try again.'
+        message: 'Invalid role. Must be either "user" or "admin"'
       });
     }
-  }
 
-  // Verify OTP and complete authentication
-  async verifyOTP(req, res) {
-    try {
-      // Check for validation errors
-      const errors = validationResult(req);
-      if (!errors.isEmpty()) {
-        return res.status(400).json({
-          success: false,
-          message: 'Validation failed',
-          errors: errors.array()
-        });
-      }
-
-      const { email, code, name } = req.body;
-
-      // Check if user exists to determine purpose
-      const existingUser = await User.findByEmail(email);
-      const purpose = existingUser ? 'login' : 'signup';
-
-      // Verify OTP
-      const verification = await OTP.verifyOTP(email, code, purpose);
-      
-      if (!verification.success) {
-        // Increment attempts for invalid OTP
-        await OTP.incrementAttempts(email, code, purpose);
-        
-        return res.status(400).json({
-          success: false,
-          message: verification.message
-        });
-      }
-
-      let user;
-      let isNewUser = false;
-
-      if (purpose === 'signup') {
-        // Create new user
-        user = new User({
-          email,
-          name: name || null,
-          isVerified: true
-        });
-        await user.save();
-        isNewUser = true;
-
-        // Send welcome email (non-blocking)
-        emailService.sendWelcomeEmail(email, name).catch(err => {
-          // Welcome email failed - continue silently
-        });
-      } else {
-        // Login existing user
-        user = existingUser;
-        
-        // Update name if provided during login
-        if (name && name !== user.name) {
-          user.name = name;
-          await user.save();
-        }
-
-        // Update last login
-        await user.updateLastLogin();
-      }
-
-      // Generate JWT token
-      const token = generateToken({
-        userId: user._id,
-        email: user.email
-      });
-
-      res.status(200).json({
-        success: true,
-        message: isNewUser ? 'Account created successfully' : 'Login successful',
-        data: {
-          token,
-          user: user.profile,
-          isNewUser
-        }
-      });
-
-    } catch (error) {
-      res.status(500).json({
+    const existingUser = await User.findOne({ email });
+    if (existingUser) {
+      return res.status(400).json({
         success: false,
-        message: 'Authentication failed. Please try again.'
+        message: 'User with this email already exists'
       });
     }
-  }
 
-  // Get user profile
-  async getProfile(req, res) {
-    try {
-      const user = await User.findById(req.user.userId);
-      
-      if (!user) {
-        return res.status(404).json({
-          success: false,
-          message: 'User not found'
-        });
-      }
+    const user = await User.create({
+      name,
+      email,
+      password,
+      role
+    });
 
-      res.status(200).json({
-        success: true,
-        data: {
-          user: user.profile
+    const token = generateToken({ id: user._id });
+
+    await sendWelcomeEmail(email, name);
+
+    res.status(201).json({
+      success: true,
+      message: 'User registered successfully',
+      data: {
+        token,
+        user: {
+          id: user._id,
+          name: user.name,
+          email: user.email,
+          role: user.role,
+          isVerified: user.isVerified,
+          createdAt: user.createdAt
         }
-      });
+      }
+    });
+  } catch (error) {
+    console.error('Registration error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error during registration'
+    });
+  }
+};
 
-    } catch (error) {
-      res.status(500).json({
+const login = async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    const user = await User.findOne({ email }).select('+password');
+    if (!user) {
+      return res.status(401).json({
         success: false,
-        message: 'Failed to fetch profile'
+        message: 'Invalid email or password'
       });
     }
-  }
 
-  // Update user profile
-  async updateProfile(req, res) {
-    try {
-      // Check for validation errors
-      const errors = validationResult(req);
-      if (!errors.isEmpty()) {
-        return res.status(400).json({
-          success: false,
-          message: 'Validation failed',
-          errors: errors.array()
-        });
-      }
+    const isPasswordValid = await user.comparePassword(password);
+    if (!isPasswordValid) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid email or password'
+      });
+    }
 
-      const { name } = req.body;
-      
-      const user = await User.findById(req.user.userId);
-      
-      if (!user) {
-        return res.status(404).json({
-          success: false,
-          message: 'User not found'
-        });
-      }
+    const token = generateToken({ id: user._id });
 
-      // Update user fields
-      if (name !== undefined) user.name = name;
-      
-      await user.save();
-
-      res.status(200).json({
-        success: true,
-        message: 'Profile updated successfully',
-        data: {
-          user: user.profile
+    res.status(200).json({
+      success: true,
+      message: 'Login successful',
+      data: {
+        token,
+        user: {
+          id: user._id,
+          name: user.name,
+          email: user.email,
+          role: user.role,
+          isVerified: user.isVerified,
+          createdAt: user.createdAt
         }
-      });
-
-    } catch (error) {
-      res.status(500).json({
-        success: false,
-        message: 'Failed to update profile'
-      });
-    }
-  }
-
-  // Logout (optional - mainly for token blacklisting if implemented)
-  async logout(req, res) {
-    try {
-      // In a stateless JWT system, logout is typically handled client-side
-      // by removing the token. However, you could implement token blacklisting here.
-      
-      res.status(200).json({
-        success: true,
-        message: 'Logged out successfully'
-      });
-
-    } catch (error) {
-      res.status(500).json({
-        success: false,
-        message: 'Logout failed'
-      });
-    }
-  }
-
-  // Get authentication status
-  async getAuthStatus(req, res) {
-    try {
-      const user = await User.findById(req.user.userId);
-      
-      if (!user) {
-        return res.status(401).json({
-          success: false,
-          message: 'Invalid token'
-        });
       }
+    });
+  } catch (error) {
+    console.error('Login error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error during login'
+    });
+  }
+};
 
-      res.status(200).json({
-        success: true,
-        data: {
-          isAuthenticated: true,
-          user: user.profile
-        }
-      });
+const forgotPassword = async (req, res) => {
+  try {
+    const { email } = req.body;
 
-    } catch (error) {
-      res.status(500).json({
+    const user = await User.findOne({ email });
+    if (!user) {
+      return res.status(404).json({
         success: false,
-        message: 'Failed to check authentication status'
+        message: 'No user found with this email address'
       });
     }
-  }
-}
 
-export default new AuthController(); 
+    const resetOTP = user.createPasswordResetOTP();
+    await user.save({ validateBeforeSave: false });
+
+    await sendOTPEmail(user.email, user.name, resetOTP);
+
+    res.status(200).json({
+      success: true,
+      message: 'Password reset OTP sent to your email'
+    });
+  } catch (error) {
+    console.error('Forgot password error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error. Please try again later.'
+    });
+  }
+};
+
+const resetPassword = async (req, res) => {
+  try {
+    const { email, otp, newPassword } = req.body;
+
+    const user = await User.findOne({
+      email,
+      resetPasswordOTP: otp,
+      resetPasswordExpires: { $gt: Date.now() }
+    }).select('+resetPasswordOTP +resetPasswordExpires');
+
+    if (!user) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid or expired OTP'
+      });
+    }
+
+    user.password = newPassword;
+    user.resetPasswordOTP = undefined;
+    user.resetPasswordExpires = undefined;
+    await user.save();
+
+    const token = generateToken({ id: user._id });
+
+    res.status(200).json({
+      success: true,
+      message: 'Password reset successful',
+      data: {
+        token,
+        user: {
+          id: user._id,
+          name: user.name,
+          email: user.email,
+          isVerified: user.isVerified,
+          createdAt: user.createdAt
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Reset password error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error during password reset'
+    });
+  }
+};
+
+const getProfile = async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id);
+    
+    res.status(200).json({
+      success: true,
+      data: {
+        user: {
+          id: user._id,
+          name: user.name,
+          email: user.email,
+          role: user.role,
+          isVerified: user.isVerified,
+          createdAt: user.createdAt
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Get profile error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while fetching profile'
+    });
+  }
+};
+
+// Set Binance API credentials
+const setBinanceCredentials = async (req, res) => {
+  try {
+    const { apiKey, secretKey } = req.body;
+    
+    if (!apiKey || !secretKey) {
+      return res.status(400).json({
+        success: false,
+        message: 'Both API key and secret key are required'
+      });
+    }
+    
+    // Basic validation for Binance API key format
+    if (apiKey.length < 20 || secretKey.length < 20) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid API key or secret key format'
+      });
+    }
+    
+    const user = await User.findById(req.user._id).select('+binanceCredentials.apiKey +binanceCredentials.secretKey');
+    
+    // Test the credentials with Binance API before saving
+    const BinanceService = require('../services/binanceService');
+    const testBinanceService = new BinanceService(apiKey, secretKey);
+    
+    try {
+      // Test credentials by getting account info
+      await testBinanceService.testCredentials(apiKey, secretKey);
+    } catch (error) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid Binance API credentials. Please check your API key and secret key.'
+      });
+    }
+    
+    // Encrypt and save credentials
+    const encryptionSuccess = user.encryptApiCredentials(apiKey, secretKey);
+    
+    if (!encryptionSuccess) {
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to encrypt API credentials'
+      });
+    }
+    
+    await user.save();
+    
+    res.status(200).json({
+      success: true,
+      message: 'Binance API credentials saved successfully',
+      data: {
+        isConfigured: true,
+        lastUpdated: user.binanceCredentials.lastUpdated
+      }
+    });
+  } catch (error) {
+    console.error('Set Binance credentials error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while saving Binance credentials'
+    });
+  }
+};
+
+// Get Binance credentials status
+const getBinanceCredentialsStatus = async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id);
+    
+    res.status(200).json({
+      success: true,
+      data: {
+        isConfigured: user.hasBinanceCredentials(),
+        lastUpdated: user.binanceCredentials?.lastUpdated || null
+      }
+    });
+  } catch (error) {
+    console.error('Get Binance credentials status error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while fetching credentials status'
+    });
+  }
+};
+
+// Remove Binance credentials
+const removeBinanceCredentials = async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id);
+    
+    user.clearBinanceCredentials();
+    await user.save();
+    
+    res.status(200).json({
+      success: true,
+      message: 'Binance API credentials removed successfully'
+    });
+  } catch (error) {
+    console.error('Remove Binance credentials error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while removing Binance credentials'
+    });
+  }
+};
+
+module.exports = {
+  register,
+  login,
+  forgotPassword,
+  resetPassword,
+  getProfile,
+  setBinanceCredentials,
+  getBinanceCredentialsStatus,
+  removeBinanceCredentials
+};

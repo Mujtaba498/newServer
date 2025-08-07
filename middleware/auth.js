@@ -1,92 +1,39 @@
-import { verifyToken } from '../config/jwt.js';
-import User from '../models/User.js';
+const User = require('../models/User');
+const { verifyToken } = require('../utils/jwt');
 
-const authenticateToken = async (req, res, next) => {
+const protect = async (req, res, next) => {
   try {
-    const authHeader = req.headers.authorization;
-    const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
+    let token;
+
+    if (req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
+      token = req.headers.authorization.split(' ')[1];
+    }
 
     if (!token) {
       return res.status(401).json({
         success: false,
-        message: 'Access token is required'
+        message: 'Access denied. No token provided.'
       });
     }
 
-    // Verify token
     const decoded = verifyToken(token);
-    
-    // Check if user still exists
-    const user = await User.findById(decoded.userId);
-    if (!user || !user.isActive) {
+    const user = await User.findById(decoded.id);
+
+    if (!user) {
       return res.status(401).json({
         success: false,
-        message: 'Invalid token or user not found'
+        message: 'Token is not valid. User not found.'
       });
     }
 
-    // Add user info to request
-    req.user = {
-      userId: decoded.userId,
-      email: decoded.email
-    };
-
+    req.user = user;
     next();
   } catch (error) {
-    
-    if (error.name === 'JsonWebTokenError') {
-      return res.status(401).json({
-        success: false,
-        message: 'Invalid token'
-      });
-    }
-    
-    if (error.name === 'TokenExpiredError') {
-      return res.status(401).json({
-        success: false,
-        message: 'Token expired'
-      });
-    }
-
-    return res.status(500).json({
+    return res.status(401).json({
       success: false,
-      message: 'Authentication failed'
+      message: 'Token is not valid.'
     });
   }
 };
 
-// Optional authentication - doesn't fail if no token
-const optionalAuth = async (req, res, next) => {
-  try {
-    const authHeader = req.headers.authorization;
-    const token = authHeader && authHeader.split(' ')[1];
-
-    if (!token) {
-      req.user = null;
-      return next();
-    }
-
-    const decoded = verifyToken(token);
-    const user = await User.findById(decoded.userId);
-    
-    if (user && user.isActive) {
-      req.user = {
-        userId: decoded.userId,
-        email: decoded.email
-      };
-    } else {
-      req.user = null;
-    }
-
-    next();
-  } catch (error) {
-    // If token is invalid, continue without user
-    req.user = null;
-    next();
-  }
-};
-
-export {
-  authenticateToken,
-  optionalAuth
-}; 
+module.exports = { protect };

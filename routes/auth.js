@@ -1,26 +1,56 @@
-import express from 'express';
+const express = require('express');
+const rateLimit = require('express-rate-limit');
+const {
+  register,
+  login,
+  forgotPassword,
+  resetPassword,
+  getProfile,
+  setBinanceCredentials,
+  getBinanceCredentialsStatus,
+  removeBinanceCredentials
+} = require('../controllers/authController');
+const {
+  registerValidation,
+  loginValidation,
+  forgotPasswordValidation,
+  resetPasswordValidation
+} = require('../middleware/validation');
+const { protect } = require('../middleware/auth');
+
 const router = express.Router();
-import authController from '../controllers/authController.js';
-import { authenticateToken } from '../middleware/auth.js';
-import { 
-  validateSendOTP, 
-  validateVerifyOTP, 
-  validateUpdateProfile 
-} from '../middleware/validation.js';
-import { 
-  otpLimiter, 
-  verifyOtpLimiter, 
-  authLimiter 
-} from '../middleware/rateLimiter.js';
 
-// Public routes
-router.post('/send-otp', otpLimiter, validateSendOTP, authController.sendOTP);
-router.post('/verify-otp', verifyOtpLimiter, validateVerifyOTP, authController.verifyOTP);
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  message: {
+    success: false,
+    message: 'Too many authentication attempts, please try again later.'
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
 
-// Protected routes
-router.get('/profile', authLimiter, authenticateToken, authController.getProfile);
-router.put('/profile', authLimiter, authenticateToken, validateUpdateProfile, authController.updateProfile);
-router.post('/logout', authLimiter, authenticateToken, authController.logout);
-router.get('/status', authLimiter, authenticateToken, authController.getAuthStatus);
+const passwordResetLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 3,
+  message: {
+    success: false,
+    message: 'Too many password reset attempts, please try again later.'
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
 
-export default router; 
+router.post('/register', authLimiter, registerValidation, register);
+router.post('/login', authLimiter, loginValidation, login);
+router.post('/forgot-password', passwordResetLimiter, forgotPasswordValidation, forgotPassword);
+router.post('/reset-password', passwordResetLimiter, resetPasswordValidation, resetPassword);
+router.get('/profile', protect, getProfile);
+
+// Binance credentials management
+router.post('/binance-credentials', protect, setBinanceCredentials);
+router.get('/binance-credentials/status', protect, getBinanceCredentialsStatus);
+router.delete('/binance-credentials', protect, removeBinanceCredentials);
+
+module.exports = router;
