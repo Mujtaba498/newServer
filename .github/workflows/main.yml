@@ -38,7 +38,7 @@ jobs:
             npm install --production
 
             echo '🚀 Restarting application with PM2...'
-            pm2 restart crypto-backend || pm2 start app.js --name crypto-backend --watch --time -- port 4002
+            pm2 restart crypto-backend || pm2 start server.js --name crypto-backend --watch --time -- port 4002
 
             echo '🔁 Reloading NGINX (if needed)...'
             sudo systemctl reload nginx || sudo systemctl restart nginx
