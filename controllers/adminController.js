@@ -98,10 +98,10 @@ const getUserDetails = async (req, res) => {
       .sort({ createdAt: -1 });
 
     // Calculate user statistics
-    const totalInvestment = bots.reduce((sum, bot) => sum + (bot.investmentAmount || 0), 0);
-    const totalProfit = bots.reduce((sum, bot) => sum + (bot.totalProfit || 0), 0);
+    const totalInvestment = bots.reduce((sum, bot) => sum + (bot.config.investmentAmount || 0), 0);
+    const totalProfit = bots.reduce((sum, bot) => sum + (bot.statistics.totalProfit || 0), 0);
     const activeBots = bots.filter(bot => bot.status === 'active').length;
-    const completedTrades = bots.reduce((sum, bot) => sum + (bot.completedTrades || 0), 0);
+    const completedTrades = bots.reduce((sum, bot) => sum + (bot.statistics.totalTrades || 0), 0);
 
     res.status(200).json({
       success: true,
@@ -161,9 +161,17 @@ const getAllBots = async (req, res) => {
 
     // Calculate overall statistics
     const allBots = await GridBot.find(query);
-    const totalInvestment = allBots.reduce((sum, bot) => sum + (bot.investmentAmount || 0), 0);
-    const totalProfit = allBots.reduce((sum, bot) => sum + (bot.totalProfit || 0), 0);
-    const activeBots = allBots.filter(bot => bot.status === 'active').length;
+    const activeBotsList = allBots.filter(bot => bot.status === 'active');
+    const stoppedBotsList = allBots.filter(bot => bot.status === 'stopped');
+    const pausedBotsList = allBots.filter(bot => bot.status === 'paused');
+    
+    const totalInvestment = allBots.reduce((sum, bot) => sum + (bot.config.investmentAmount || 0), 0);
+    const activeBotsInvestment = activeBotsList.reduce((sum, bot) => sum + (bot.config.investmentAmount || 0), 0);
+    const stoppedBotsInvestment = stoppedBotsList.reduce((sum, bot) => sum + (bot.config.investmentAmount || 0), 0);
+    const pausedBotsInvestment = pausedBotsList.reduce((sum, bot) => sum + (bot.config.investmentAmount || 0), 0);
+    
+    const totalProfit = allBots.reduce((sum, bot) => sum + (bot.statistics.totalProfit || 0), 0);
+    const activeBots = activeBotsList.length;
 
     res.status(200).json({
       success: true,
@@ -180,9 +188,12 @@ const getAllBots = async (req, res) => {
         statistics: {
           totalBots: allBots.length,
           activeBots,
-          stoppedBots: allBots.filter(bot => bot.status === 'stopped').length,
-          pausedBots: allBots.filter(bot => bot.status === 'paused').length,
+          stoppedBots: stoppedBotsList.length,
+          pausedBots: pausedBotsList.length,
           totalInvestment,
+          activeBotsInvestment,
+          stoppedBotsInvestment,
+          pausedBotsInvestment,
           totalProfit,
           profitPercentage: totalInvestment > 0 ? ((totalProfit / totalInvestment) * 100).toFixed(2) : 0
         }
@@ -214,9 +225,17 @@ const getPlatformStats = async (req, res) => {
 
     // Get financial statistics
     const allBots = await GridBot.find();
-    const totalInvestment = allBots.reduce((sum, bot) => sum + (bot.investmentAmount || 0), 0);
-    const totalProfit = allBots.reduce((sum, bot) => sum + (bot.totalProfit || 0), 0);
-    const totalTrades = allBots.reduce((sum, bot) => sum + (bot.completedTrades || 0), 0);
+    const activeBotsList = allBots.filter(bot => bot.status === 'active');
+    const stoppedBotsList = allBots.filter(bot => bot.status === 'stopped');
+    const pausedBotsList = allBots.filter(bot => bot.status === 'paused');
+    
+    const totalInvestment = allBots.reduce((sum, bot) => sum + (bot.config.investmentAmount || 0), 0);
+    const activeBotsInvestment = activeBotsList.reduce((sum, bot) => sum + (bot.config.investmentAmount || 0), 0);
+    const stoppedBotsInvestment = stoppedBotsList.reduce((sum, bot) => sum + (bot.config.investmentAmount || 0), 0);
+    const pausedBotsInvestment = pausedBotsList.reduce((sum, bot) => sum + (bot.config.investmentAmount || 0), 0);
+    
+    const totalProfit = allBots.reduce((sum, bot) => sum + (bot.statistics.totalProfit || 0), 0);
+    const totalTrades = allBots.reduce((sum, bot) => sum + (bot.statistics.totalTrades || 0), 0);
 
     // Get recent activity (last 7 days)
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
@@ -243,6 +262,9 @@ const getPlatformStats = async (req, res) => {
         },
         financial: {
           totalInvestment,
+          activeBotsInvestment,
+          stoppedBotsInvestment,
+          pausedBotsInvestment,
           totalProfit,
           totalTrades,
           profitPercentage: totalInvestment > 0 ? ((totalProfit / totalInvestment) * 100).toFixed(2) : 0,
