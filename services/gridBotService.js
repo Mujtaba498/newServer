@@ -794,16 +794,22 @@ class GridBotService {
       const bot = await GridBot.findById(botId);
       if (!bot) throw new Error('Bot not found');
 
-        const userBinance = await this.getUserBinanceService(bot.userId);
+      const userBinance = await this.getUserBinanceService(bot.userId);
       
       const currentPrice = await userBinance.getSymbolPrice(bot.symbol);
       const symbolInfo = await userBinance.getSymbolInfo(bot.symbol);
       
+      // **FIX: Sync order status with Binance before analysis**
+      console.log(`Syncing order status with Binance for bot ${botId}...`);
+      await this.syncOrderStatusWithBinance(bot, userBinance);
+      
+      // Reload bot after sync to get updated order statuses
+      const updatedBot = await GridBot.findById(botId);
       
       // Separate orders by status and type
-      const filledOrders = bot.orders.filter(o => o.status === 'FILLED');
-      const openOrders = bot.orders.filter(o => o.status === 'NEW');
-      const canceledOrders = bot.orders.filter(o => o.status === 'CANCELED');
+      const filledOrders = updatedBot.orders.filter(o => o.status === 'FILLED');
+      const openOrders = updatedBot.orders.filter(o => o.status === 'NEW');
+      const canceledOrders = updatedBot.orders.filter(o => o.status === 'CANCELED');
       
       // Calculate trade pairs (buy-sell cycles)
       const tradePairs = this.calculateTradePairs(filledOrders);
@@ -865,13 +871,13 @@ class GridBotService {
           if (currentPrice <= order.price) {
             status = 'likely_to_fill';
           }
-          potential = (bot.config.profitPerGrid / 100) * order.price * order.quantity;
+          potential = (updatedBot.config.profitPerGrid / 100) * order.price * order.quantity;
         } else {
           if (currentPrice >= order.price) {
             status = 'likely_to_fill';
           }
           // For sell orders, profit is already calculated when buy order was filled
-          potential = (order.price - (order.price / (1 + bot.config.profitPerGrid / 100))) * order.quantity;
+          potential = (order.price - (order.price / (1 + updatedBot.config.profitPerGrid / 100))) * order.quantity;
         }
         
         potentialProfit += potential;
@@ -889,36 +895,36 @@ class GridBotService {
       }
       
       // Calculate total investment and returns
-      const totalInvestment = bot.statistics.totalInvestment || bot.config.investmentAmount;
-      const totalValue = holdingsValue + (bot.statistics.totalProfit || 0);
+      const totalInvestment = updatedBot.statistics.totalInvestment || updatedBot.config.investmentAmount;
+      const totalValue = holdingsValue + (updatedBot.statistics.totalProfit || 0);
       const totalReturn = totalValue - totalInvestment;
       const totalReturnPercentage = (totalReturn / totalInvestment * 100).toFixed(4);
       
       // Calculate trading fees (approximate)
       const totalTrades = filledOrders.length;
-      const estimatedFees = totalTrades * 0.001 * (totalInvestment / bot.config.gridLevels); // 0.1% fee estimate
+      const estimatedFees = totalTrades * 0.001 * (totalInvestment / updatedBot.config.gridLevels); // 0.1% fee estimate
       
       return {
         botInfo: {
-          botId: bot._id,
-          symbol: bot.symbol,
-          status: bot.status,
-          createdAt: bot.createdAt,
-          startTime: bot.statistics.startTime,
-          runtime: bot.statistics.startTime ? 
-            Math.floor((new Date() - new Date(bot.statistics.startTime)) / (1000 * 60 * 60)) + ' hours' : 'N/A'
+          botId: updatedBot._id,
+          symbol: updatedBot.symbol,
+          status: updatedBot.status,
+          createdAt: updatedBot.createdAt,
+          startTime: updatedBot.statistics.startTime,
+          runtime: updatedBot.statistics.startTime ? 
+            Math.floor((new Date() - new Date(updatedBot.statistics.startTime)) / (1000 * 60 * 60)) + ' hours' : 'N/A'
         },
         marketData: {
           currentPrice: currentPrice,
           gridRange: {
-            upper: bot.config.upperPrice,
-            lower: bot.config.lowerPrice,
-            levels: bot.config.gridLevels,
-            profitPerGrid: bot.config.profitPerGrid
+            upper: updatedBot.config.upperPrice,
+            lower: updatedBot.config.lowerPrice,
+            levels: updatedBot.config.gridLevels,
+            profitPerGrid: updatedBot.config.profitPerGrid
           },
           pricePosition: {
-            percentage: ((currentPrice - bot.config.lowerPrice) / (bot.config.upperPrice - bot.config.lowerPrice) * 100).toFixed(2),
-            trend: currentPrice > (bot.config.upperPrice + bot.config.lowerPrice) / 2 ? 'upper_half' : 'lower_half'
+            percentage: ((currentPrice - updatedBot.config.lowerPrice) / (updatedBot.config.upperPrice - updatedBot.config.lowerPrice) * 100).toFixed(2),
+            trend: currentPrice > (updatedBot.config.upperPrice + updatedBot.config.lowerPrice) / 2 ? 'upper_half' : 'lower_half'
           }
         },
         profitLossAnalysis: {
@@ -936,7 +942,7 @@ class GridBotService {
         tradingActivity: {
           completedTrades: completedTrades.length,
           totalTrades: totalTrades,
-          successfulTrades: bot.statistics.successfulTrades || completedTrades.length,
+          successfulTrades: updatedBot.statistics.successfulTrades || completedTrades.length,
           averageTradeProfit: completedTrades.length > 0 ? 
             (realizedPnL / completedTrades.length).toFixed(6) : 0,
           bestTrade: completedTrades.length > 0 ? 
@@ -1093,6 +1099,50 @@ class GridBotService {
     const stdDev = Math.sqrt(variance);
     
     return stdDev !== 0 ? (mean / stdDev).toFixed(4) : 'N/A';
+  }
+
+  // Sync order status with Binance
+  async syncOrderStatusWithBinance(bot, userBinance) {
+    try {
+      let hasUpdates = false;
+
+      // Get all orders that might need status updates (NEW, PARTIALLY_FILLED)
+      const ordersToCheck = bot.orders.filter(order => 
+        ['NEW', 'PARTIALLY_FILLED'].includes(order.status)
+      );
+
+      for (const order of ordersToCheck) {
+        try {
+          // Query order status from Binance
+          const binanceOrder = await userBinance.getOrderStatus(bot.symbol, order.orderId);
+
+          // Update order if status has changed
+          if (binanceOrder.status !== order.status) {
+            order.status = binanceOrder.status;
+            order.executedQty = binanceOrder.executedQty;
+            order.cummulativeQuoteQty = binanceOrder.cummulativeQuoteQty;
+            order.updatedAt = new Date();
+            hasUpdates = true;
+
+            console.log(`Updated order ${order.orderId} status from ${order.status} to ${binanceOrder.status}`);
+          }
+        } catch (orderError) {
+          console.error(`Error checking order ${order.orderId}:`, orderError.message);
+          // Continue with other orders even if one fails
+        }
+      }
+
+      // Save updates if any
+      if (hasUpdates) {
+        await bot.save();
+        console.log(`Synced order statuses for bot ${bot._id}`);
+      }
+
+      return hasUpdates;
+    } catch (error) {
+      console.error('Error syncing order status with Binance:', error);
+      return false;
+    }
   }
 }
 
