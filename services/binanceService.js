@@ -1,18 +1,39 @@
 const crypto = require('crypto');
 const axios = require('axios');
 const { BINANCE_API_KEY, BINANCE_SECRET_KEY } = require('../config/env');
+const webSocketManager = require('./webSocketManager');
 
 class BinanceService {
-  constructor(userApiKey = null, userSecretKey = null) {
+  constructor(userApiKey = null, userSecretKey = null, userId = null) {
     this.baseURL = 'https://api.binance.com';
     this.apiKey = userApiKey || BINANCE_API_KEY || null;
     this.secretKey = userSecretKey || BINANCE_SECRET_KEY || null;
+    this.userId = userId;
     this.timeOffset = 0;
     this.lastSyncTime = 0;
     this.syncInterval = 5 * 60 * 1000; // Sync every 5 minutes
     this.recvWindow = 5000; // 5 seconds receive window
     this.initialized = false;
     this.hasCredentials = !!(this.apiKey && this.secretKey);
+    this.useWebSocket = true; // Enable WebSocket by default
+    
+    // Initialize WebSocket connection if user credentials are provided
+    if (this.userId && this.hasCredentials) {
+      this.initializeWebSocket();
+    }
+  }
+
+  // Initialize WebSocket connection
+  async initializeWebSocket() {
+    if (this.userId && this.hasCredentials && this.useWebSocket) {
+      try {
+        await webSocketManager.createUserConnection(this.userId, this.apiKey, this.secretKey);
+        console.log(`WebSocket initialized for user ${this.userId}`);
+      } catch (error) {
+        console.warn(`WebSocket initialization failed for user ${this.userId}, falling back to REST API:`, error.message);
+        this.useWebSocket = false;
+      }
+    }
   }
 
   // Initialize the service with time sync
@@ -149,8 +170,21 @@ class BinanceService {
     });
   }
 
-  // Get symbol price
+  // Get symbol price (WebSocket first, REST fallback)
   async getSymbolPrice(symbol) {
+    // Try WebSocket data first
+    if (this.useWebSocket && this.userId) {
+      const cachedPrice = webSocketManager.getCachedPrice(symbol);
+      if (cachedPrice && cachedPrice.price) {
+        console.log(`Using WebSocket price for ${symbol}: ${cachedPrice.price}`);
+        return cachedPrice.price;
+      }
+      
+      // Subscribe to symbol if not already subscribed
+      await webSocketManager.subscribeToSymbol(this.userId, symbol);
+    }
+    
+    // Fallback to REST API
     try {
       const response = await axios.get(`${this.baseURL}/api/v3/ticker/price`, {
         params: { symbol }
@@ -409,6 +443,57 @@ class BinanceService {
       };
     } catch (error) {
       throw new Error(`Failed to get balance for ${asset}: ${error.message}`);
+    }
+  }
+
+  // Get 24hr ticker statistics (WebSocket first, REST fallback)
+  async get24hrTicker(symbol) {
+    // Try WebSocket data first
+    if (this.useWebSocket && this.userId) {
+      const cachedData = webSocketManager.getCachedPrice(symbol);
+      if (cachedData && cachedData.priceChange !== undefined) {
+        console.log(`Using WebSocket ticker data for ${symbol}`);
+        return {
+          symbol: cachedData.symbol,
+          priceChange: cachedData.priceChange || 0,
+          priceChangePercent: cachedData.priceChange || 0,
+          lastPrice: cachedData.price,
+          highPrice: cachedData.high || cachedData.price,
+          lowPrice: cachedData.low || cachedData.price,
+          volume: cachedData.volume || 0,
+          openPrice: cachedData.open || cachedData.price,
+          closeTime: cachedData.timestamp || Date.now()
+        };
+      }
+      
+      // Subscribe to symbol if not already subscribed
+      await webSocketManager.subscribeToSymbol(this.userId, symbol);
+    }
+    
+    // Fallback to REST API
+    try {
+      const response = await axios.get(`${this.baseURL}/api/v3/ticker/24hr?symbol=${symbol}`);
+      return {
+        symbol: response.data.symbol,
+        priceChange: parseFloat(response.data.priceChange),
+        priceChangePercent: parseFloat(response.data.priceChangePercent),
+        weightedAvgPrice: parseFloat(response.data.weightedAvgPrice),
+        prevClosePrice: parseFloat(response.data.prevClosePrice),
+        lastPrice: parseFloat(response.data.lastPrice),
+        lastQty: parseFloat(response.data.lastQty),
+        bidPrice: parseFloat(response.data.bidPrice),
+        askPrice: parseFloat(response.data.askPrice),
+        openPrice: parseFloat(response.data.openPrice),
+        highPrice: parseFloat(response.data.highPrice),
+        lowPrice: parseFloat(response.data.lowPrice),
+        volume: parseFloat(response.data.volume),
+        quoteVolume: parseFloat(response.data.quoteVolume),
+        openTime: response.data.openTime,
+        closeTime: response.data.closeTime,
+        count: response.data.count
+      };
+    } catch (error) {
+      throw new Error(`Failed to get 24hr ticker: ${error.message}`);
     }
   }
 

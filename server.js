@@ -6,6 +6,7 @@ const rateLimit = require('express-rate-limit');
 
 const { PORT, FRONTEND_URL, validateEnvVars } = require('./config/env');
 const connectDB = require('./config/database');
+const webSocketManager = require('./services/webSocketManager');
 const authRoutes = require('./routes/auth');
 const gridBotRoutes = require('./routes/gridBot');
 const adminRoutes = require('./routes/admin');
@@ -15,6 +16,10 @@ validateEnvVars();
 const app = express();
 
 connectDB();
+
+// Initialize WebSocket Manager
+webSocketManager.initialize();
+console.log('WebSocket Manager initialized');
 
 const globalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -113,13 +118,31 @@ const server = app.listen(PORT, () => {
 process.on('unhandledRejection', (err) => {
   console.error('Unhandled Promise Rejection:', err);
   server.close(() => {
+    webSocketManager.cleanup();
     process.exit(1);
   });
 });
 
 process.on('uncaughtException', (err) => {
   console.error('Uncaught Exception:', err);
+  webSocketManager.cleanup();
   process.exit(1);
+});
+
+process.on('SIGTERM', () => {
+  console.log('SIGTERM received, shutting down gracefully');
+  server.close(() => {
+    webSocketManager.cleanup();
+    process.exit(0);
+  });
+});
+
+process.on('SIGINT', () => {
+  console.log('SIGINT received, shutting down gracefully');
+  server.close(() => {
+    webSocketManager.cleanup();
+    process.exit(0);
+  });
 });
 
 module.exports = app;

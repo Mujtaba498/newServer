@@ -27,7 +27,7 @@ class GridBotService {
       throw new Error('Failed to decrypt user Binance credentials');
     }
 
-    const userBinanceService = new BinanceService(credentials.apiKey, credentials.secretKey);
+    const userBinanceService = new BinanceService(credentials.apiKey, credentials.secretKey, userId);
     this.userBinanceServices.set(userId, userBinanceService);
     
     return userBinanceService;
