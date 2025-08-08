@@ -28,8 +28,8 @@ const gridBotSchema = new mongoose.Schema({
   status: {
     type: String,
     enum: {
-      values: ['active', 'paused', 'stopped', 'error'],
-      message: 'Status must be one of: active, paused, stopped, error'
+      values: ['active', 'paused', 'stopped', 'error', 'recovering'],
+      message: 'Status must be one of: active, paused, stopped, error, recovering'
     },
     default: 'paused'
   },
@@ -168,6 +168,21 @@ const gridBotSchema = new mongoose.Schema({
       type: Number,
       default: 0
     },
+    isFilled: {
+      type: Boolean,
+      default: false
+    },
+    filledAt: {
+      type: Date
+    },
+    hasCorrespondingSell: {
+      type: Boolean,
+      default: false
+    },
+    isRecoveryOrder: {
+      type: Boolean,
+      default: false
+    },
     createdAt: {
       type: Date,
       default: Date.now
@@ -190,6 +205,22 @@ const gridBotSchema = new mongoose.Schema({
       type: Date,
       default: Date.now
     }
+  }],
+  recoveryHistory: [{
+    timestamp: {
+      type: Date,
+      default: Date.now
+    },
+    type: {
+      type: String,
+      enum: ['sell_order_recovery', 'status_sync', 'balance_check', 'error_recovery']
+    },
+    ordersPlaced: {
+      type: Number,
+      default: 0
+    },
+    orderIds: [String],
+    details: mongoose.Schema.Types.Mixed
   }],
   riskManagement: {
     maxLoss: {

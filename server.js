@@ -7,6 +7,7 @@ const rateLimit = require('express-rate-limit');
 const { PORT, FRONTEND_URL, validateEnvVars } = require('./config/env');
 const connectDB = require('./config/database');
 const webSocketManager = require('./services/webSocketManager');
+const recoveryService = require('./services/recoveryService');
 const authRoutes = require('./routes/auth');
 const gridBotRoutes = require('./routes/gridBot');
 const adminRoutes = require('./routes/admin');
@@ -107,6 +108,15 @@ app.use((error, req, res, next) => {
     success: false,
     message: error.message || 'Internal Server Error'
   });
+});
+
+// Run recovery on startup
+connectDB().then(async () => {
+  console.log('🔄 Running bot recovery check...');
+  await recoveryService.performRecovery();
+  console.log('✅ Recovery check completed');
+}).catch(err => {
+  console.error('❌ Failed to run recovery:', err);
 });
 
 const server = app.listen(PORT, () => {

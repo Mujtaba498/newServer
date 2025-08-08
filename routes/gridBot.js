@@ -82,4 +82,44 @@ router.post('/:botId/pause', tradingLimiter, gridBotIdValidation, pauseGridBot);
 router.get('/:botId/performance', gridBotLimiter, gridBotIdValidation, getGridBotPerformance);
 router.get('/:botId/analysis', gridBotLimiter, gridBotIdValidation, getDetailedGridBotAnalysis);
 
+// Recovery endpoint
+const recoveryService = require('../services/recoveryService');
+const GridBot = require('../models/GridBot');
+
+router.post('/:botId/recover', gridBotLimiter, gridBotIdValidation, async (req, res) => {
+  try {
+    const bot = await GridBot.findById(req.params.botId);
+    if (!bot) {
+      return res.status(404).json({
+        success: false,
+        message: 'Bot not found'
+      });
+    }
+
+    if (bot.userId.toString() !== req.user._id.toString()) {
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to recover this bot'
+      });
+    }
+
+    await recoveryService.recoverBot(bot);
+    
+    res.json({
+      success: true,
+      message: 'Bot recovery completed successfully',
+      bot: {
+        id: bot._id,
+        status: bot.status,
+        recoveryHistory: bot.recoveryHistory
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: `Recovery failed: ${error.message}`
+    });
+  }
+});
+
 module.exports = router;

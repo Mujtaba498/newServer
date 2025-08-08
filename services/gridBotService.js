@@ -294,6 +294,13 @@ class GridBotService {
           const orderStatus = await userBinance.getOrderStatus(bot.symbol, order.orderId);
           
           if (orderStatus.status === 'FILLED') {
+            const orderIndex = bot.orders.findIndex(o => o.orderId === order.orderId);
+            if (orderIndex !== -1) {
+              bot.orders[orderIndex].status = 'FILLED';
+              bot.orders[orderIndex].isFilled = true;
+              bot.orders[orderIndex].filledAt = new Date();
+              bot.orders[orderIndex].executedQty = parseFloat(orderStatus.executedQty);
+            }
             await this.handleFilledOrder(bot, order, symbolInfo, userBinance);
           }
         }
@@ -383,6 +390,14 @@ class GridBotService {
             status: 'NEW',
             gridLevel: filledOrder.gridLevel
           });
+
+          // Mark buy order as having corresponding sell
+          if (filledOrder.side === 'BUY') {
+            const buyOrderIndex = bot.orders.findIndex(o => o.orderId === filledOrder.orderId);
+            if (buyOrderIndex !== -1) {
+              bot.orders[buyOrderIndex].hasCorrespondingSell = true;
+            }
+          }
 
           // Update statistics
           bot.statistics.totalTrades += 1;
