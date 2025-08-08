@@ -1,6 +1,7 @@
 const User = require('../models/User');
 const GridBot = require('../models/GridBot');
 const mongoose = require('mongoose');
+const gridBotService = require('../services/gridBotService');
 
 // Get all users with their basic information
 const getAllUsers = async (req, res) => {
@@ -97,15 +98,50 @@ const getUserDetails = async (req, res) => {
     const bots = await GridBot.find({ userId })
       .sort({ createdAt: -1 });
 
+    // Get detailed analysis for each bot
+    const detailedBots = [];
+    for (const bot of bots) {
+      try {
+        const detailedAnalysis = await gridBotService.getDetailedBotAnalysis(bot._id);
+        detailedBots.push({
+          basicInfo: bot,
+          detailedAnalysis
+        });
+      } catch (error) {
+        console.error(`Failed to get detailed analysis for bot ${bot._id}:`, error.message);
+        // Include basic bot info even if detailed analysis fails
+        detailedBots.push({
+          basicInfo: bot,
+          detailedAnalysis: null,
+          error: error.message
+        });
+      }
+    }
+
     // Calculate user statistics
     const totalInvestment = bots.reduce((sum, bot) => sum + (bot.config.investmentAmount || 0), 0);
     const totalProfit = bots.reduce((sum, bot) => sum + (bot.statistics.totalProfit || 0), 0);
     const activeBots = bots.filter(bot => bot.status === 'active').length;
     const completedTrades = bots.reduce((sum, bot) => sum + (bot.statistics.totalTrades || 0), 0);
+    
+    // Calculate additional statistics from detailed analysis
+    let totalRealizedPnL = 0;
+    let totalUnrealizedPnL = 0;
+    let totalCompletedTrades = 0;
+    let totalOpenOrders = 0;
+    
+    detailedBots.forEach(botData => {
+      if (botData.detailedAnalysis) {
+        totalRealizedPnL += botData.detailedAnalysis.profitLossAnalysis.realizedPnL || 0;
+        totalUnrealizedPnL += botData.detailedAnalysis.profitLossAnalysis.unrealizedPnL || 0;
+        totalCompletedTrades += botData.detailedAnalysis.tradingActivity.completedTrades || 0;
+        totalOpenOrders += botData.detailedAnalysis.currentPositions.totalOpenOrders || 0;
+      }
+    });
 
     res.status(200).json({
       success: true,
-      message: 'User details retrieved successfully',
+      message: 'User details with comprehensive bot analytics retrieved successfully',
       data: {
         user: {
           ...user.toObject(),
@@ -117,10 +153,24 @@ const getUserDetails = async (req, res) => {
             totalInvestment,
             totalProfit,
             completedTrades,
-            profitPercentage: totalInvestment > 0 ? ((totalProfit / totalInvestment) * 100).toFixed(2) : 0
+            profitPercentage: totalInvestment > 0 ? ((totalProfit / totalInvestment) * 100).toFixed(2) : 0,
+            // Enhanced statistics from detailed analysis
+            totalRealizedPnL,
+            totalUnrealizedPnL,
+            totalPnL: totalRealizedPnL + totalUnrealizedPnL,
+            totalCompletedTrades,
+            totalOpenOrders,
+            averageProfitPerBot: bots.length > 0 ? (totalProfit / bots.length).toFixed(6) : 0,
+            averageCompletedTradesPerBot: bots.length > 0 ? (totalCompletedTrades / bots.length).toFixed(2) : 0
           }
         },
-        bots
+        bots: detailedBots,
+        summary: {
+          totalBotsAnalyzed: detailedBots.length,
+          successfulAnalysis: detailedBots.filter(b => b.detailedAnalysis !== null).length,
+          failedAnalysis: detailedBots.filter(b => b.detailedAnalysis === null).length,
+          analysisTimestamp: new Date().toISOString()
+        }
       }
     });
   } catch (error) {
