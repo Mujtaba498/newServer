@@ -35,7 +35,7 @@ class WebSocketManager extends EventEmitter {
     const now = Date.now();
     const staleThreshold = 10 * 60 * 1000; // 10 minutes
     
-    for (const [userId, connection] of this.connections.entries()) {
+    for (const [userId, connection] of this.userConnections.entries()) {
       if (now - connection.lastActivity > staleThreshold) {
         console.log(`Cleaning up stale connection for user ${userId}`);
         this.closeUserConnection(userId);
@@ -45,11 +45,11 @@ class WebSocketManager extends EventEmitter {
 
   // Close user connection
   closeUserConnection(userId) {
-    const connection = this.connections.get(userId);
+    const connection = this.userConnections.get(userId);
     if (connection && connection.ws) {
       connection.ws.close();
     }
-    this.connections.delete(userId);
+    this.userConnections.delete(userId);
     this.reconnectAttempts.delete(userId);
   }
 
