@@ -179,8 +179,8 @@ class BinanceService {
 
   // Get symbol price (WebSocket first, REST fallback)
   async getSymbolPrice(symbol, maxRetries = 3) {
-    // Try WebSocket data first
-    if (this.useWebSocket && this.userId) {
+    // Try WebSocket data first (shared public streams)
+    if (this.useWebSocket) {
       const cachedPrice = webSocketManager.getCachedPrice(symbol);
       if (cachedPrice && cachedPrice.price) {
         console.log(`Using WebSocket price for ${symbol}: ${cachedPrice.price}`);
@@ -189,10 +189,11 @@ class BinanceService {
       
       // Subscribe to symbol if not already subscribed
       try {
+        // userId is optional now; shared manager handles symbol-level subscription
         await webSocketManager.subscribeToSymbol(this.userId, symbol);
         
         // Wait a moment for WebSocket data to arrive
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        await new Promise(resolve => setTimeout(resolve, 700));
         
         const updatedPrice = webSocketManager.getCachedPrice(symbol);
         if (updatedPrice && updatedPrice.price) {

@@ -5,11 +5,23 @@ const crypto = require('crypto');
 class WebSocketManager extends EventEmitter {
   constructor() {
     super();
+    // NEW: Single shared WebSocket for all symbols
+    this.sharedConnection = null;
+    this.connectionStatus = 'disconnected'; // disconnected, connecting, connected
+    this.reconnectAttempts = 0;
+    
+    // Symbol subscription management
+    this.subscribedSymbols = new Set(); // symbols we're subscribed to
+    this.symbolUsers = new Map(); // symbol -> Set of userIds interested
+    this.priceStreams = new Map(); // symbol -> latest price data
+    
+    // Legacy user connections (keep for backward compatibility)
     this.userConnections = new Map(); // userId -> WebSocket connection
-    this.priceStreams = new Map(); // symbol -> price data
-    this.reconnectAttempts = new Map(); // userId -> attempt count
+    this.userReconnectAttempts = new Map(); // userId -> attempt count
+    
     this.maxReconnectAttempts = 5;
     this.reconnectDelay = 5000; // 5 seconds
+    this.pingInterval = null;
     this.initialized = false;
   }
 
@@ -22,12 +34,109 @@ class WebSocketManager extends EventEmitter {
     console.log('WebSocket Manager initializing...');
     this.initialized = true;
     
-    // Set up periodic cleanup of stale connections
+    // Set up periodic cleanup of stale connections (legacy user connections)
     setInterval(() => {
       this.cleanupStaleConnections();
     }, 5 * 60 * 1000); // Every 5 minutes
     
+    // Initialize shared connection lazily on first subscribe
     console.log('WebSocket Manager initialized successfully');
+  }
+
+  // Create or ensure shared connection
+  ensureSharedConnection() {
+    if (this.connectionStatus === 'connected') return true;
+    if (this.connectionStatus === 'connecting') return false;
+    
+    this.connectionStatus = 'connecting';
+    const wsUrl = 'wss://stream.binance.com:9443/ws';
+    const ws = new WebSocket(wsUrl);
+    this.sharedConnection = ws;
+    
+    ws.on('open', () => {
+      this.connectionStatus = 'connected';
+      this.reconnectAttempts = 0;
+      console.log('Shared Binance WebSocket connected');
+      
+      // Resubscribe to existing symbols
+      if (this.subscribedSymbols.size > 0) {
+        const params = Array.from(this.subscribedSymbols).map(s => `${s.toLowerCase()}@ticker`);
+        ws.send(JSON.stringify({ method: 'SUBSCRIBE', params, id: Date.now() }));
+        // Also subscribe to 1m klines for richer data
+        const klineParams = Array.from(this.subscribedSymbols).map(s => `${s.toLowerCase()}@kline_1m`);
+        ws.send(JSON.stringify({ method: 'SUBSCRIBE', params: klineParams, id: Date.now() + 1 }));
+      }
+      
+      // Start ping to keep alive
+      if (this.pingInterval) clearInterval(this.pingInterval);
+      this.pingInterval = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.ping();
+        }
+      }, 30000);
+    });
+    
+    ws.on('message', (data) => {
+      try {
+        const message = JSON.parse(data);
+        this.handleSharedMessage(message);
+      } catch (err) {
+        console.error('Error parsing shared WS message:', err.message);
+      }
+    });
+    
+    ws.on('close', () => {
+      console.log('Shared Binance WebSocket disconnected');
+      this.connectionStatus = 'disconnected';
+      if (this.pingInterval) {
+        clearInterval(this.pingInterval);
+        this.pingInterval = null;
+      }
+      this.scheduleSharedReconnect();
+    });
+    
+    ws.on('error', (err) => {
+      console.error('Shared Binance WebSocket error:', err.message);
+    });
+    
+    return false; // connection in progress
+  }
+
+  scheduleSharedReconnect() {
+    if (this.connectionStatus === 'connected') return;
+    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+      console.error('Max shared WS reconnect attempts reached');
+      return;
+    }
+    const delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts);
+    this.reconnectAttempts += 1;
+    console.log(`Reconnecting shared WS in ${delay}ms (attempt ${this.reconnectAttempts})`);
+    setTimeout(() => this.ensureSharedConnection(), delay);
+  }
+
+  handleSharedMessage(message) {
+    if (message.e === '24hrTicker') {
+      this.updatePriceData(message.s, {
+        symbol: message.s,
+        price: parseFloat(message.c),
+        priceChange: parseFloat(message.P),
+        volume: parseFloat(message.v),
+        high: parseFloat(message.h),
+        low: parseFloat(message.l),
+        timestamp: message.E
+      });
+    } else if (message.e === 'kline') {
+      const k = message.k;
+      this.updatePriceData(k.s, {
+        symbol: k.s,
+        price: parseFloat(k.c),
+        open: parseFloat(k.o),
+        high: parseFloat(k.h),
+        low: parseFloat(k.l),
+        volume: parseFloat(k.v),
+        timestamp: k.T
+      });
+    }
   }
 
   // Clean up stale connections
@@ -180,33 +289,72 @@ class WebSocketManager extends EventEmitter {
     this.emit('priceUpdate', { symbol, data });
   }
 
-  // Subscribe user to symbol streams
+  // Subscribe user to symbol streams (now uses shared connection)
   async subscribeToSymbol(userId, symbol) {
     const connection = this.userConnections.get(userId);
-    if (!connection || !connection.isConnected) {
-      return false;
-    }
-
-    try {
-      // Add symbol to user's subscription list
-      connection.symbols.add(symbol.toLowerCase());
-      
-      // Subscribe to ticker and kline streams
-      const subscribeMessage = {
-        method: 'SUBSCRIBE',
-        params: [
-          `${symbol.toLowerCase()}@ticker`,
-          `${symbol.toLowerCase()}@kline_1m`
-        ],
-        id: Date.now()
-      };
-      
-      connection.ws.send(JSON.stringify(subscribeMessage));
-      console.log(`Subscribed user ${userId} to ${symbol}`);
+    // Maintain record for user-specific interest
+    const users = this.symbolUsers.get(symbol) || new Set();
+    if (userId) users.add(userId);
+    this.symbolUsers.set(symbol, users);
+    
+    // Ensure shared connection and subscribe
+    this.ensureSharedConnection();
+    
+    // If already subscribed at shared level, nothing else to do
+    if (this.subscribedSymbols.has(symbol)) {
       return true;
-    } catch (error) {
-      console.error(`Failed to subscribe user ${userId} to ${symbol}:`, error.message);
-      return false;
+    }
+    
+    this.subscribedSymbols.add(symbol);
+    
+    if (this.sharedConnection && this.sharedConnection.readyState === WebSocket.OPEN) {
+      try {
+        this.sharedConnection.send(JSON.stringify({
+          method: 'SUBSCRIBE',
+          params: [
+            `${symbol.toLowerCase()}@ticker`,
+            `${symbol.toLowerCase()}@kline_1m`
+          ],
+          id: Date.now()
+        }));
+        console.log(`Subscribed shared stream to ${symbol}`);
+        return true;
+      } catch (err) {
+        console.warn(`Shared subscribe failed for ${symbol}: ${err.message}`);
+        return false;
+      }
+    }
+    return false;
+  }
+  
+  // Unsubscribe helper (optional usage)
+  unsubscribeSymbol(symbol, userId = null) {
+    if (userId) {
+      const users = this.symbolUsers.get(symbol);
+      if (users) {
+        users.delete(userId);
+        if (users.size === 0) this.symbolUsers.delete(symbol);
+      }
+    }
+    
+    if (this.symbolUsers.has(symbol)) return; // still needed
+    if (!this.subscribedSymbols.has(symbol)) return;
+    
+    this.subscribedSymbols.delete(symbol);
+    if (this.sharedConnection && this.sharedConnection.readyState === WebSocket.OPEN) {
+      try {
+        this.sharedConnection.send(JSON.stringify({
+          method: 'UNSUBSCRIBE',
+          params: [
+            `${symbol.toLowerCase()}@ticker`,
+            `${symbol.toLowerCase()}@kline_1m`
+          ],
+          id: Date.now()
+        }));
+        console.log(`Unsubscribed shared stream from ${symbol}`);
+      } catch (err) {
+        console.warn(`Shared unsubscribe failed for ${symbol}: ${err.message}`);
+      }
     }
   }
 
