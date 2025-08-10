@@ -1,5 +1,6 @@
 const BinanceService = require('./binanceService');
 const GridBot = require('../models/GridBot');
+const webSocketManager = require('./webSocketManager');
 
 class GridBotService {
   constructor() {
@@ -7,12 +8,140 @@ class GridBotService {
     this.activeBots = new Map(); // Store active bot instances
     this.intervals = new Map(); // Store interval timers
     this.userBinanceServices = new Map(); // Store user-specific Binance service instances
+    
+    // Set up WebSocket event listener for immediate order handling
+    this.setupWebSocketOrderListener();
+  }
+
+  // Set up WebSocket event listener for orderUpdate events
+  setupWebSocketOrderListener() {
+    webSocketManager.on('orderUpdate', async (data) => {
+      try {
+        const { userId, orderId, symbol, side, status, executedQty, price } = data;
+        
+        // Only handle FILLED orders
+        if (status !== 'FILLED') return;
+        
+        console.log(`🔔 WebSocket FILLED order detected: ${side} ${executedQty} ${symbol} @ ${price} (ID: ${orderId})`);
+        
+        // Find the bot that has this order
+        const bot = await this.findBotByOrder(userId, orderId, symbol);
+        if (!bot) {
+          console.log(`No active bot found for order ${orderId} on ${symbol}`);
+          return;
+        }
+        
+        // Find the specific order in the bot
+        const botOrder = bot.orders.find(o => o.orderId.toString() === orderId.toString());
+        if (!botOrder) {
+          console.log(`Order ${orderId} not found in bot ${bot._id} orders`);
+          return;
+        }
+        
+        // Update the order status immediately
+        botOrder.status = 'FILLED';
+        botOrder.isFilled = true;
+        botOrder.filledAt = new Date();
+        botOrder.executedQty = parseFloat(executedQty);
+        
+        console.log(`📈 Processing immediate opposite order for ${side} fill...`);
+        
+        // Get user Binance service and symbol info
+        const userBinance = await this.getUserBinanceService(userId);
+        const symbolInfo = await userBinance.getSymbolInfo(symbol);
+        
+        // Handle the filled order immediately
+        await this.handleFilledOrder(bot, botOrder, symbolInfo, userBinance);
+        
+        await bot.save();
+        console.log(`✅ Immediate opposite order handling completed for ${orderId}`);
+        
+      } catch (error) {
+        console.error('❌ Error handling WebSocket orderUpdate:', error.message);
+      }
+    });
+    
+    console.log('🎧 WebSocket orderUpdate listener initialized for immediate opposite order placement');
+  }
+
+  // Find bot by order ID and symbol
+  async findBotByOrder(userId, orderId, symbol) {
+    try {
+      // Convert orderId to string for consistent matching (database stores as string)
+      const orderIdStr = orderId.toString();
+      const userIdStr = userId.toString();
+      
+      console.log(`🔍 Looking for bot with order ${orderIdStr} for user ${userIdStr} on ${symbol}`);
+      
+      // Search through active bots for this user (refresh from DB to avoid stale cache)
+      for (const [botId, bot] of this.activeBots) {
+        if (bot.userId.toString() === userIdStr && bot.symbol === symbol) {
+          // Refresh bot data from database to ensure we have latest state
+          const freshBot = await GridBot.findById(botId);
+          if (freshBot && freshBot.orders.some(order => order.orderId.toString() === orderIdStr)) {
+            console.log(`✅ Found bot ${botId} in active cache with order ${orderIdStr}`);
+            return freshBot;
+          }
+        }
+      }
+      
+      // If not found in active bots cache, search database directly
+      console.log(`🔄 Searching database for bot with order ${orderIdStr}...`);
+      let bot = await GridBot.findOne({
+        userId: userId,
+        symbol: symbol,
+        'orders.orderId': orderIdStr
+      });
+      
+      // If still not found, retry once after a short delay (for timing issues with recovery orders)
+      if (!bot) {
+        console.log(`⏳ Order not found, retrying in 500ms (recovery order timing)...`);
+        await new Promise(resolve => setTimeout(resolve, 500));
+        
+        bot = await GridBot.findOne({
+          userId: userId,
+          symbol: symbol,
+          'orders.orderId': orderIdStr
+        });
+      }
+      
+      if (bot) {
+        console.log(`✅ Found bot ${bot._id} in database with order ${orderIdStr}`);
+        // Log order details for debugging
+        const matchingOrder = bot.orders.find(order => order.orderId.toString() === orderIdStr);
+        if (matchingOrder) {
+          console.log(`📋 Order details: side=${matchingOrder.side}, price=${matchingOrder.price}, status=${matchingOrder.status}, isRecoveryOrder=${matchingOrder.isRecoveryOrder}`);
+        }
+      } else {
+        console.log(`❌ No bot found with order ${orderIdStr} for user ${userIdStr} on ${symbol}`);
+        
+        // Additional debug: Search for any bot with this symbol for this user
+        const anyBotForSymbol = await GridBot.findOne({
+          userId: userId,
+          symbol: symbol
+        });
+        
+        if (anyBotForSymbol) {
+          console.log(`🔍 Found bot ${anyBotForSymbol._id} for ${symbol} but without order ${orderIdStr}`);
+          const orderIds = anyBotForSymbol.orders.map(o => o.orderId.toString());
+          console.log(`📝 Bot has orders: [${orderIds.slice(0, 5).join(', ')}]${orderIds.length > 5 ? '...' : ''}`);
+        } else {
+          console.log(`❌ No bot found for user ${userIdStr} on ${symbol} at all`);
+        }
+      }
+      
+      return bot;
+    } catch (error) {
+      console.error('Error finding bot by order:', error.message);
+      return null;
+    }
   }
 
   // Get or create user-specific Binance service
   async getUserBinanceService(userId) {
-    if (this.userBinanceServices.has(userId)) {
-      return this.userBinanceServices.get(userId);
+    const key = userId.toString();
+    if (this.userBinanceServices.has(key)) {
+      return this.userBinanceServices.get(key);
     }
 
     const User = require('../models/User');
@@ -28,7 +157,7 @@ class GridBotService {
     }
 
     const userBinanceService = new BinanceService(credentials.apiKey, credentials.secretKey, userId);
-    this.userBinanceServices.set(userId, userBinanceService);
+    this.userBinanceServices.set(key, userBinanceService);
     
     return userBinanceService;
   }

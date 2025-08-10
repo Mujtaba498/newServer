@@ -34,10 +34,15 @@ class BinanceService {
   async initializeWebSocket() {
     if (this.userId && this.hasCredentials && this.useWebSocket) {
       try {
-        await webSocketManager.createUserConnection(this.userId, this.apiKey, this.secretKey);
-        console.log(`WebSocket initialized for user ${this.userId}`);
+        const success = await webSocketManager.createUserConnection(this.userId, this.apiKey, this.secretKey);
+        if (success) {
+          console.log(`WebSocket initialized for user ${this.userId}`);
+        } else {
+          console.warn(`WebSocket initialization failed for user ${this.userId}, falling back to REST API`);
+          this.useWebSocket = false;
+        }
       } catch (error) {
-        console.warn(`WebSocket initialization failed for user ${this.userId}, falling back to REST API:`, error.message);
+        console.warn(`WebSocket initialization exception for user ${this.userId}, falling back to REST API:`, error.message);
         this.useWebSocket = false;
       }
     }
@@ -138,9 +143,19 @@ class BinanceService {
           } catch (syncError) {
             console.error(`Time sync failed: ${syncError.message}`);
           }
-        } else {
-          break;
+          continue;
         }
+        
+        // Handle rate limiting and temporary service errors
+        const status = error.response?.status;
+        if ((status === 418 || status === 429 || status === 503) && attempt < maxRetries) {
+          const delay = Math.pow(2, attempt) * 500; // 0.5s, 1s, 2s
+          console.warn(`Transient Binance error ${status}, retrying in ${delay}ms (attempt ${attempt + 1}/${maxRetries + 1})`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+          continue;
+        }
+        
+        break;
       }
     }
     

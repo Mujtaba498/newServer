@@ -78,7 +78,8 @@ Please respond ONLY in the following JSON format (no additional text):
   "gridLevels": integer,
   "profitPerGrid": number,
   "reasoning": "Brief explanation of the strategy"
-}`;
+}
+`;
   }
 
   async getMarketAnalysisData(symbol) {

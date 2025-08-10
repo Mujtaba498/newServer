@@ -8,7 +8,9 @@ class WebSocketManager extends EventEmitter {
     // NEW: Single shared WebSocket for all symbols
     this.sharedConnection = null;
     this.connectionStatus = 'disconnected'; // disconnected, connecting, connected
-    this.reconnectAttempts = 0;
+    this.reconnectAttempts = new Map();
+    // Shared connection reconnect counter
+    this.sharedReconnectAttempts = 0;
     
     // Symbol subscription management
     this.subscribedSymbols = new Set(); // symbols we're subscribed to
@@ -55,7 +57,7 @@ class WebSocketManager extends EventEmitter {
     
     ws.on('open', () => {
       this.connectionStatus = 'connected';
-      this.reconnectAttempts = 0;
+      this.sharedReconnectAttempts = 0;
       console.log('Shared Binance WebSocket connected');
       
       // Resubscribe to existing symbols
@@ -104,13 +106,13 @@ class WebSocketManager extends EventEmitter {
 
   scheduleSharedReconnect() {
     if (this.connectionStatus === 'connected') return;
-    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+    if (this.sharedReconnectAttempts >= this.maxReconnectAttempts) {
       console.error('Max shared WS reconnect attempts reached');
       return;
     }
-    const delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts);
-    this.reconnectAttempts += 1;
-    console.log(`Reconnecting shared WS in ${delay}ms (attempt ${this.reconnectAttempts})`);
+    const delay = this.reconnectDelay * Math.pow(2, this.sharedReconnectAttempts);
+    this.sharedReconnectAttempts += 1;
+    console.log(`Reconnecting shared WS in ${delay}ms (attempt ${this.sharedReconnectAttempts})`);
     setTimeout(() => this.ensureSharedConnection(), delay);
   }
 
@@ -159,7 +161,7 @@ class WebSocketManager extends EventEmitter {
       connection.ws.close();
     }
     this.userConnections.delete(userId);
-    this.reconnectAttempts.delete(userId);
+    this.reconnectAttempts.set(userId, 0);
   }
 
   // Create WebSocket connection for a user
@@ -206,13 +208,16 @@ class WebSocketManager extends EventEmitter {
     ws.on('open', () => {
       console.log(`WebSocket connected for user ${userId}`);
       connection.isConnected = true;
-      this.reconnectAttempts.delete(userId);
+      // reset per-user reconnect attempts
+      this.reconnectAttempts.set(userId, 0);
       
       // Subscribe to user's symbols
       this.subscribeToUserSymbols(userId);
     });
 
     ws.on('message', (data) => {
+      connection.lastActivity = Date.now();
+      
       try {
         const message = JSON.parse(data);
         this.handleWebSocketMessage(userId, message);
@@ -232,7 +237,7 @@ class WebSocketManager extends EventEmitter {
       connection.isConnected = false;
     });
 
-    // Setup ping/pong to keep connection alive
+    // Set up ping/pong to keep connection alive
     const pingInterval = setInterval(() => {
       if (ws.readyState === WebSocket.OPEN) {
         ws.ping();
@@ -243,11 +248,11 @@ class WebSocketManager extends EventEmitter {
     }, 30000); // Ping every 30 seconds
   }
 
-  // Handle incoming WebSocket messages
+  // Handle WebSocket messages
   handleWebSocketMessage(userId, message) {
-    // Handle different message types
+    // Handle 24hr ticker data
     if (message.e === '24hrTicker') {
-      // 24hr ticker statistics
+      // Update price data
       this.updatePriceData(message.s, {
         symbol: message.s,
         price: parseFloat(message.c),
@@ -258,7 +263,7 @@ class WebSocketManager extends EventEmitter {
         timestamp: message.E
       });
     } else if (message.e === 'kline') {
-      // Kline/candlestick data
+      // Handle kline (candlestick) data
       const kline = message.k;
       this.updatePriceData(kline.s, {
         symbol: kline.s,
@@ -270,7 +275,7 @@ class WebSocketManager extends EventEmitter {
         timestamp: kline.T
       });
     } else if (message.e === 'executionReport') {
-      // Order execution updates
+      // Handle order execution reports
       this.emit('orderUpdate', {
         userId,
         orderId: message.i,
@@ -283,41 +288,43 @@ class WebSocketManager extends EventEmitter {
     }
   }
 
-  // Update price data cache
+  // Update price data and emit events
   updatePriceData(symbol, data) {
     this.priceStreams.set(symbol, data);
     this.emit('priceUpdate', { symbol, data });
   }
 
-  // Subscribe user to symbol streams (now uses shared connection)
+  // Subscribe to a symbol
   async subscribeToSymbol(userId, symbol) {
     const connection = this.userConnections.get(userId);
-    // Maintain record for user-specific interest
+    // Add to shared tracking
     const users = this.symbolUsers.get(symbol) || new Set();
     if (userId) users.add(userId);
     this.symbolUsers.set(symbol, users);
     
-    // Ensure shared connection and subscribe
+    // Ensure shared connection is available
     this.ensureSharedConnection();
     
-    // If already subscribed at shared level, nothing else to do
+    // If already subscribed, nothing more to do
     if (this.subscribedSymbols.has(symbol)) {
       return true;
     }
-    
+
     this.subscribedSymbols.add(symbol);
-    
+
     if (this.sharedConnection && this.sharedConnection.readyState === WebSocket.OPEN) {
       try {
+        // Subscribe to ticker and kline data
+        const tickerParam = `${symbol.toLowerCase()}@ticker`;
+        const klineParam = `${symbol.toLowerCase()}@kline_1m`;
+        
         this.sharedConnection.send(JSON.stringify({
           method: 'SUBSCRIBE',
-          params: [
-            `${symbol.toLowerCase()}@ticker`,
-            `${symbol.toLowerCase()}@kline_1m`
-          ],
+          params: [tickerParam, klineParam],
           id: Date.now()
         }));
-        console.log(`Subscribed shared stream to ${symbol}`);
+        
+        console.log(`Subscribed to ${symbol} ticker and kline data via shared connection`);
         return true;
       } catch (err) {
         console.warn(`Shared subscribe failed for ${symbol}: ${err.message}`);
@@ -327,7 +334,7 @@ class WebSocketManager extends EventEmitter {
     return false;
   }
   
-  // Unsubscribe helper (optional usage)
+  // Unsubscribe from a symbol
   unsubscribeSymbol(symbol, userId = null) {
     if (userId) {
       const users = this.symbolUsers.get(symbol);
@@ -336,29 +343,30 @@ class WebSocketManager extends EventEmitter {
         if (users.size === 0) this.symbolUsers.delete(symbol);
       }
     }
-    
+
     if (this.symbolUsers.has(symbol)) return; // still needed
     if (!this.subscribedSymbols.has(symbol)) return;
-    
+
     this.subscribedSymbols.delete(symbol);
     if (this.sharedConnection && this.sharedConnection.readyState === WebSocket.OPEN) {
       try {
+        const tickerParam = `${symbol.toLowerCase()}@ticker`;
+        const klineParam = `${symbol.toLowerCase()}@kline_1m`;
+        
         this.sharedConnection.send(JSON.stringify({
           method: 'UNSUBSCRIBE',
-          params: [
-            `${symbol.toLowerCase()}@ticker`,
-            `${symbol.toLowerCase()}@kline_1m`
-          ],
+          params: [tickerParam, klineParam],
           id: Date.now()
         }));
-        console.log(`Unsubscribed shared stream from ${symbol}`);
+        
+        console.log(`Unsubscribed from ${symbol} shared streams`);
       } catch (err) {
         console.warn(`Shared unsubscribe failed for ${symbol}: ${err.message}`);
       }
     }
   }
 
-  // Subscribe to all symbols for a user
+  // Subscribe to user's symbols (when user connection opens)
   subscribeToUserSymbols(userId) {
     const connection = this.userConnections.get(userId);
     if (!connection) return;
@@ -369,20 +377,20 @@ class WebSocketManager extends EventEmitter {
     });
   }
 
-  // Get cached price data
+  // Get cached price data for a symbol
   getCachedPrice(symbol) {
     return this.priceStreams.get(symbol.toUpperCase());
   }
 
-  // Handle reconnection logic
+  // Handle reconnection for a user
   async handleReconnection(userId) {
     const attempts = this.reconnectAttempts.get(userId) || 0;
-    
+
     if (attempts < this.maxReconnectAttempts) {
       this.reconnectAttempts.set(userId, attempts + 1);
-      
+
       console.log(`Attempting to reconnect user ${userId} (attempt ${attempts + 1})`);
-      
+
       setTimeout(async () => {
         const connection = this.userConnections.get(userId);
         if (connection) {
@@ -392,60 +400,40 @@ class WebSocketManager extends EventEmitter {
     } else {
       console.error(`Max reconnection attempts reached for user ${userId}`);
       this.userConnections.delete(userId);
-      this.reconnectAttempts.delete(userId);
+      this.reconnectAttempts.set(userId, 0);
     }
   }
 
-  // Close user connection
-  closeUserConnection(userId) {
-    const connection = this.userConnections.get(userId);
-    if (connection) {
-      if (connection.ws && connection.ws.readyState === WebSocket.OPEN) {
-        connection.ws.close();
-      }
-      this.userConnections.delete(userId);
-      console.log(`Closed WebSocket connection for user ${userId}`);
-    }
-  }
+  // duplicate closeUserConnection removed (handled earlier in class)
 
-  // Create listen key for user stream
+  // Create listen key for user data stream
   async createListenKey(apiKey, secretKey) {
     const axios = require('axios');
-    const timestamp = Date.now();
-    const queryString = `timestamp=${timestamp}`;
-    const signature = crypto
-      .createHmac('sha256', secretKey)
-      .update(queryString)
-      .digest('hex');
-
+    
     try {
       const response = await axios.post(
         'https://api.binance.com/api/v3/userDataStream',
-        null,
+        null, // No data/parameters for this endpoint
         {
           headers: {
             'X-MBX-APIKEY': apiKey
-          },
-          params: {
-            timestamp,
-            signature
           }
         }
       );
       
       return response.data.listenKey;
     } catch (error) {
-      throw new Error(`Failed to create listen key: ${error.message}`);
+      throw new Error(`Failed to create listen key: ${error.response?.data?.msg || error.message}`);
     }
   }
 
-  // Check if user has active connection
+  // Check if user is connected
   isUserConnected(userId) {
     const connection = this.userConnections.get(userId);
     return connection && connection.isConnected;
   }
 
-  // Get connection stats
+  // Get connection statistics
   getConnectionStats() {
     const stats = {
       totalConnections: this.userConnections.size,
@@ -461,8 +449,8 @@ class WebSocketManager extends EventEmitter {
       
       stats.users.push({
         userId,
-        isConnected: connection.isConnected,
-        symbolCount: connection.symbols.size,
+        connected: connection.isConnected,
+        symbols: Array.from(connection.symbols),
         lastPing: connection.lastPing
       });
     });
@@ -477,14 +465,16 @@ class WebSocketManager extends EventEmitter {
       this.closeUserConnection(userId);
     });
     this.priceStreams.clear();
-    this.reconnectAttempts.clear();
+    // Reset reconnection tracking structures
+    this.reconnectAttempts = new Map();
+    this.sharedReconnectAttempts = 0;
   }
 }
 
-// Singleton instance
+// Create singleton instance
 const webSocketManager = new WebSocketManager();
 
-// Graceful shutdown
+// Graceful shutdown handlers
 process.on('SIGINT', () => {
   webSocketManager.cleanup();
   process.exit(0);
