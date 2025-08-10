@@ -6,6 +6,12 @@ const webSocketManager = require('./webSocketManager');
 class BinanceService {
   constructor(userApiKey = null, userSecretKey = null, userId = null) {
     this.baseURL = 'https://api.binance.com';
+    this.fallbackURLs = [
+      'https://api1.binance.com',
+      'https://api2.binance.com',
+      'https://api3.binance.com'
+    ];
+    this.currentUrlIndex = 0;
     this.apiKey = userApiKey || BINANCE_API_KEY || null;
     this.secretKey = userSecretKey || BINANCE_SECRET_KEY || null;
     this.userId = userId;
@@ -16,6 +22,7 @@ class BinanceService {
     this.initialized = false;
     this.hasCredentials = !!(this.apiKey && this.secretKey);
     this.useWebSocket = true; // Enable WebSocket by default
+    this.rateLimitResetTime = null; // Track when rate limit resets
     
     // Initialize WebSocket connection if user credentials are provided
     if (this.userId && this.hasCredentials) {
@@ -171,7 +178,7 @@ class BinanceService {
   }
 
   // Get symbol price (WebSocket first, REST fallback)
-  async getSymbolPrice(symbol) {
+  async getSymbolPrice(symbol, maxRetries = 3) {
     // Try WebSocket data first
     if (this.useWebSocket && this.userId) {
       const cachedPrice = webSocketManager.getCachedPrice(symbol);
@@ -181,18 +188,85 @@ class BinanceService {
       }
       
       // Subscribe to symbol if not already subscribed
-      await webSocketManager.subscribeToSymbol(this.userId, symbol);
+      try {
+        await webSocketManager.subscribeToSymbol(this.userId, symbol);
+        
+        // Wait a moment for WebSocket data to arrive
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        
+        const updatedPrice = webSocketManager.getCachedPrice(symbol);
+        if (updatedPrice && updatedPrice.price) {
+          console.log(`Using updated WebSocket price for ${symbol}: ${updatedPrice.price}`);
+          return updatedPrice.price;
+        }
+      } catch (wsError) {
+        console.warn(`WebSocket subscription failed for ${symbol}:`, wsError.message);
+      }
     }
     
-    // Fallback to REST API
-    try {
-      const response = await axios.get(`${this.baseURL}/api/v3/ticker/price`, {
-        params: { symbol }
-      });
-      return parseFloat(response.data.price);
-    } catch (error) {
-      throw new Error(`Failed to get price for ${symbol}: ${error.message}`);
+    // Fallback to REST API with retry logic for rate limiting
+    let lastError;
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      try {
+        // Try primary baseURL, then rotate through fallbacks on certain errors
+        const urlsToTry = [this.baseURL, ...this.fallbackURLs];
+        let lastInnerError;
+        for (let u = 0; u < urlsToTry.length; u++) {
+          const base = urlsToTry[(this.currentUrlIndex + u) % urlsToTry.length];
+          try {
+            const response = await axios.get(`${base}/api/v3/ticker/price`, {
+              params: { symbol },
+              timeout: 10000
+            });
+            // If success, update current index to this base for future calls
+            this.currentUrlIndex = (this.currentUrlIndex + u) % urlsToTry.length;
+            return parseFloat(response.data.price);
+          } catch (innerErr) {
+            lastInnerError = innerErr;
+            const innerStatus = innerErr.response?.status;
+            // On 418/429/503, continue to next fallback URL
+            if (innerStatus === 418 || innerStatus === 429 || innerStatus === 503) {
+              console.warn(`Base ${base} failed with ${innerStatus}, trying next fallback for ${symbol}...`);
+              continue;
+            }
+            // For other errors, break and throw
+            break;
+          }
+        }
+        // If all URLs failed, throw the last error
+        throw lastInnerError;
+      } catch (error) {
+        lastError = error;
+        const statusCode = error.response?.status;
+        
+        // Handle rate limiting (418) and other temporary errors
+        if ((statusCode === 418 || statusCode === 429 || statusCode === 503) && attempt < maxRetries - 1) {
+          const delay = Math.pow(2, attempt) * 1000; // Exponential backoff: 1s, 2s, 4s
+          console.warn(`Rate limited for ${symbol} (status ${statusCode}), retrying in ${delay}ms (attempt ${attempt + 1}/${maxRetries})`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+          continue;
+        }
+        
+        // For other errors or final retry, break and throw
+        break;
+      }
     }
+    
+    // If all retries failed, provide more specific error message
+    const statusCode = lastError.response?.status;
+    let errorMessage = `Failed to get price for ${symbol}`;
+    
+    if (statusCode === 418) {
+      errorMessage += ': Rate limited by Binance (418). Please try again in a few minutes.';
+    } else if (statusCode === 429) {
+      errorMessage += ': Too many requests (429). Please try again later.';
+    } else if (statusCode === 503) {
+      errorMessage += ': Binance service temporarily unavailable (503).';
+    } else {
+      errorMessage += `: ${lastError.message}`;
+    }
+    
+    throw new Error(errorMessage);
   }
 
   // Get symbol info (for precision, min quantity, etc.)

@@ -811,7 +811,22 @@ class GridBotService {
 
       const userBinance = await this.getUserBinanceService(bot.userId);
       
-      const currentPrice = await userBinance.getSymbolPrice(bot.symbol);
+      // Get current price with enhanced error handling
+      let currentPrice;
+      try {
+        currentPrice = await userBinance.getSymbolPrice(bot.symbol);
+      } catch (priceError) {
+        console.error(`Price fetch failed for ${bot.symbol} in analysis:`, priceError.message);
+        // Try to use the last known price if available
+        if (bot.aiAnalysis && bot.aiAnalysis.marketData && bot.aiAnalysis.marketData.currentPrice) {
+          console.warn(`Using AI analysis cached price for ${bot.symbol}: ${bot.aiAnalysis.marketData.currentPrice}`);
+          currentPrice = bot.aiAnalysis.marketData.currentPrice;
+        } else {
+          // If no fallback price available, throw with user-friendly message
+          throw new Error(`Cannot retrieve current price for ${bot.symbol}. This may be due to Binance rate limiting. Please try again in a few minutes.`);
+        }
+      }
+      
       const symbolInfo = await userBinance.getSymbolInfo(bot.symbol);
       
       // **FIX: Sync order status with Binance before analysis**
