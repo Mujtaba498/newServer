@@ -3,7 +3,7 @@ const BinanceService = require('./binanceService');
 
 class KimiAIService {
   constructor() {
-    this.apiKey = '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';
+    this.apiKey = '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';
     this.baseURL = 'https://openrouter.ai/api/v1/chat/completions';
     this.binanceService = new BinanceService();
   }
@@ -20,7 +20,7 @@ class KimiAIService {
       const prompt = this.createAnalysisPrompt(symbol, currentPrice, investmentAmount, marketData);
       
       const response = await axios.post(this.baseURL, {
-        model: "moonshotai/kimi-k2",
+        model: "moonshotai/kimi-k2:free",
         messages: [
           {
             role: "user",
