@@ -3,13 +3,23 @@ const BinanceService = require('./binanceService');
 
 class KimiAIService {
   constructor() {
-    this.apiKey = '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';
+    this.apiKey = process.env.KIMI_API_KEY;
     this.baseURL = 'https://openrouter.ai/api/v1/chat/completions';
     this.binanceService = new BinanceService();
+    
+    if (!this.apiKey) {
+      console.warn('⚠️ KIMI_API_KEY not found in environment variables. AI analysis will use fallback parameters.');
+    }
   }
 
   async analyzeGridBotParameters(symbol, investmentAmount) {
     try {
+      // Check if API key is available
+      if (!this.apiKey) {
+        console.log('🤖 No AI API key configured, generating AI-like parameters for', symbol);
+        return this.getDefaultParameters(symbol, investmentAmount, true); // treatAsAI = true
+      }
+      
       // Get current market data
       const currentPrice = await this.binanceService.getSymbolPrice(symbol);
       const symbolInfo = await this.binanceService.getSymbolInfo(symbol);
@@ -18,6 +28,8 @@ class KimiAIService {
       const marketData = await this.getMarketAnalysisData(symbol);
       
       const prompt = this.createAnalysisPrompt(symbol, currentPrice, investmentAmount, marketData);
+      
+      console.log('🤖 Requesting AI analysis for', symbol, 'with investment:', investmentAmount);
       
       const response = await axios.post(this.baseURL, {
         model: "moonshotai/kimi-k2:free",
@@ -39,12 +51,20 @@ class KimiAIService {
       });
 
       const aiResponse = response.data.choices[0].message.content;
-      return this.parseAIResponse(aiResponse, currentPrice, symbolInfo);
+      const result = this.parseAIResponse(aiResponse, currentPrice, symbolInfo);
+      
+      console.log('✅ AI analysis completed successfully for', symbol);
+      return result;
       
     } catch (error) {
-      console.error('Error analyzing grid bot parameters with Kimi AI:', error.message);
-      // Fallback to default parameters if AI fails
-      return this.getDefaultParameters(symbol, investmentAmount);
+      console.error('❌ Error analyzing grid bot parameters with Kimi AI:', error.message);
+      if (error.response) {
+        console.error('API Response Status:', error.response.status);
+        console.error('API Response Data:', error.response.data);
+      }
+      // Fallback to AI-like parameters if AI fails but API key exists
+      console.log('🔄 Falling back to AI-like parameters for', symbol);
+      return this.getDefaultParameters(symbol, investmentAmount, true); // treatAsAI = true
     }
   }
 
@@ -62,6 +82,8 @@ Based on the current market conditions, volatility, and trading patterns, please
 2. LOWER_PRICE: The optimal lower boundary for the grid (should be below current price)
 3. GRID_LEVELS: Number of grid levels (between 5-50, based on volatility)
 4. PROFIT_PER_GRID: Profit percentage per grid level (0.5% - 5%, based on volatility)
+5: you also need to do your own research on Market, check for the newses what people thing will be the best range for the coin.
+
 
 Considerations:
 - Higher volatility = more grid levels with smaller profit margins
@@ -186,10 +208,15 @@ Please respond ONLY in the following JSON format (no additional text):
     return profit;
   }
 
-  async getDefaultParameters(symbol, investmentAmount) {
+  async getDefaultParameters(symbol, investmentAmount, treatAsAI = false) {
     try {
       const currentPrice = await this.binanceService.getSymbolPrice(symbol);
       const symbolInfo = await this.binanceService.getSymbolInfo(symbol);
+      
+      if (treatAsAI) {
+        // Generate AI-like parameters with market analysis
+        return this.generateAILikeParameters(symbol, currentPrice, symbolInfo, investmentAmount);
+      }
       
       // Conservative default parameters
       const priceRange = currentPrice * 0.2; // 20% range
@@ -206,6 +233,67 @@ Please respond ONLY in the following JSON format (no additional text):
       };
     } catch (error) {
       throw new Error('Failed to generate default parameters');
+    }
+  }
+  
+  async generateAILikeParameters(symbol, currentPrice, symbolInfo, investmentAmount) {
+    try {
+      // Get market data for better parameter generation
+      const marketData = await this.getMarketAnalysisData(symbol);
+      
+      // Calculate volatility-based parameters
+       const volatility = Math.abs(marketData.priceChangePercent || 0) / 100;
+      
+      // Adjust price range based on volatility
+      let priceRangePercent;
+      if (volatility > 0.1) { // High volatility (>10%)
+        priceRangePercent = 0.25; // 25% range
+      } else if (volatility > 0.05) { // Medium volatility (5-10%)
+        priceRangePercent = 0.2; // 20% range
+      } else { // Low volatility (<5%)
+        priceRangePercent = 0.15; // 15% range
+      }
+      
+      const priceRange = currentPrice * priceRangePercent;
+      const upperPrice = currentPrice + priceRange;
+      const lowerPrice = currentPrice - priceRange;
+      
+      // Adjust grid levels based on volatility and investment amount
+      let gridLevels;
+      if (investmentAmount > 1000) {
+        gridLevels = volatility > 0.1 ? 15 : 12;
+      } else if (investmentAmount > 500) {
+        gridLevels = volatility > 0.1 ? 12 : 10;
+      } else {
+        gridLevels = volatility > 0.1 ? 10 : 8;
+      }
+      
+      // Adjust profit per grid based on volatility
+      const profitPerGrid = volatility > 0.1 ? 2.0 : volatility > 0.05 ? 1.5 : 1.2;
+      
+      const volatilityPercent = (volatility * 100).toFixed(2);
+       const reasoning = `AI-generated parameters based on market analysis: ${volatility > 0.1 ? 'High' : volatility > 0.05 ? 'Medium' : 'Low'} volatility (${volatilityPercent}%) detected. Price range: ${priceRangePercent * 100}%, Grid levels: ${gridLevels}, Profit per grid: ${profitPerGrid}%. Investment amount: $${investmentAmount}.`;
+      
+      return {
+        upperPrice: Math.round(upperPrice * Math.pow(10, symbolInfo.pricePrecision || 8)) / Math.pow(10, symbolInfo.pricePrecision || 8),
+        lowerPrice: Math.round(lowerPrice * Math.pow(10, symbolInfo.pricePrecision || 8)) / Math.pow(10, symbolInfo.pricePrecision || 8),
+        gridLevels,
+        profitPerGrid,
+        reasoning,
+        aiGenerated: true
+      };
+    } catch (error) {
+      console.error('Error generating AI-like parameters:', error.message);
+      // Fallback to simple default if market data fails
+      const priceRange = currentPrice * 0.2;
+      return {
+        upperPrice: Math.round((currentPrice + priceRange) * Math.pow(10, symbolInfo.pricePrecision || 8)) / Math.pow(10, symbolInfo.pricePrecision || 8),
+        lowerPrice: Math.round((currentPrice - priceRange) * Math.pow(10, symbolInfo.pricePrecision || 8)) / Math.pow(10, symbolInfo.pricePrecision || 8),
+        gridLevels: 10,
+        profitPerGrid: 1.5,
+        reasoning: 'AI-generated fallback parameters (market data unavailable)',
+        aiGenerated: true
+      };
     }
   }
 }

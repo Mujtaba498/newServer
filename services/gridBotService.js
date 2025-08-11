@@ -491,7 +491,8 @@ class GridBotService {
             console.log(`${symbolInfo.baseAsset} balance: ${baseBalance.free}, Required: ${filledOrder.quantity}`);
             
             if (baseBalance.free < filledOrder.quantity) {
-              throw new Error(`Insufficient ${symbolInfo.baseAsset} balance for sell order. Available: ${baseBalance.free}, Required: ${filledOrder.quantity}`);
+              console.error(`❌ Insufficient ${symbolInfo.baseAsset} balance for sell order. Available: ${baseBalance.free}, Required: ${filledOrder.quantity}`);
+              return; // Exit without setting hasCorrespondingSell flag
             }
           } else {
             const quoteBalance = await userBinance.getAssetBalance(symbolInfo.quoteAsset);
@@ -499,7 +500,8 @@ class GridBotService {
             console.log(`${symbolInfo.quoteAsset} balance: ${quoteBalance.free}, Required: ${requiredAmount}`);
             
             if (quoteBalance.free < requiredAmount) {
-              throw new Error(`Insufficient ${symbolInfo.quoteAsset} balance for buy order. Available: ${quoteBalance.free}, Required: ${requiredAmount}`);
+              console.error(`❌ Insufficient ${symbolInfo.quoteAsset} balance for buy order. Available: ${quoteBalance.free}, Required: ${requiredAmount}`);
+              return; // Exit without setting hasCorrespondingSell flag
             }
           }
           
@@ -520,13 +522,15 @@ class GridBotService {
             gridLevel: filledOrder.gridLevel
           });
 
-          // Mark buy order as having corresponding sell
+          // Mark buy order as having corresponding sell ONLY after successful placement
           if (filledOrder.side === 'BUY') {
             const buyOrderIndex = bot.orders.findIndex(o => o.orderId === filledOrder.orderId);
             if (buyOrderIndex !== -1) {
               bot.orders[buyOrderIndex].hasCorrespondingSell = true;
             }
           }
+
+          console.log(`✅ Successfully placed opposite ${oppositeSide} order ${oppositeOrder.orderId} for bot ${bot._id} at price ${oppositePrice}`);
 
           // Update statistics
           bot.statistics.totalTrades += 1;
@@ -540,8 +544,11 @@ class GridBotService {
 
           console.log(`Placed opposite ${oppositeSide} order for bot ${bot._id} at price ${oppositePrice}`);
         } catch (error) {
-          console.error(`Failed to place opposite order:`, error.message);
+          console.error(`❌ Failed to place opposite order for bot ${bot._id}:`, error.message);
+          // Don't set hasCorrespondingSell flag if order placement failed
         }
+      } else {
+        console.log(`⚠️  Opposite order price ${oppositePrice} is outside grid range (${bot.config.lowerPrice} - ${bot.config.upperPrice})`);
       }
     } catch (error) {
       console.error(`Error handling filled order:`, error.message);
