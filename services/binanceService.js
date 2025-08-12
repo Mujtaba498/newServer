@@ -286,33 +286,74 @@ class BinanceService {
   }
 
   // Get symbol info (for precision, min quantity, etc.)
-  async getSymbolInfo(symbol) {
-    try {
-      const response = await axios.get(`${this.baseURL}/api/v3/exchangeInfo`);
-      const symbolInfo = response.data.symbols.find(s => s.symbol === symbol);
+  async getSymbolInfo(symbol, maxRetries = 3) {
+    return await this.executeWithTimestampRetry(async () => {
+      let lastError;
       
-      if (!symbolInfo) {
-        throw new Error(`Symbol ${symbol} not found`);
-      }
+      for (let attempt = 0; attempt < maxRetries; attempt++) {
+        try {
+          // Try different base URLs if available
+          const urlsToTry = [this.baseURL, ...this.fallbackURLs];
+          const baseUrl = urlsToTry[attempt % urlsToTry.length];
+          
+          const response = await axios.get(`${baseUrl}/api/v3/exchangeInfo`, {
+            timeout: 10000
+          });
+          
+          const symbolInfo = response.data.symbols.find(s => s.symbol === symbol);
+          
+          if (!symbolInfo) {
+            throw new Error(`Symbol ${symbol} not found`);
+          }
 
-      return {
-        symbol: symbolInfo.symbol,
-        status: symbolInfo.status,
-        baseAsset: symbolInfo.baseAsset,
-        quoteAsset: symbolInfo.quoteAsset,
-        pricePrecision: symbolInfo.quotePrecision,
-        quantityPrecision: symbolInfo.baseAssetPrecision,
-        minQty: parseFloat(symbolInfo.filters.find(f => f.filterType === 'LOT_SIZE')?.minQty || 0),
-        maxQty: parseFloat(symbolInfo.filters.find(f => f.filterType === 'LOT_SIZE')?.maxQty || 0),
-        stepSize: parseFloat(symbolInfo.filters.find(f => f.filterType === 'LOT_SIZE')?.stepSize || 0),
-        minPrice: parseFloat(symbolInfo.filters.find(f => f.filterType === 'PRICE_FILTER')?.minPrice || 0),
-        maxPrice: parseFloat(symbolInfo.filters.find(f => f.filterType === 'PRICE_FILTER')?.maxPrice || 0),
-        tickSize: parseFloat(symbolInfo.filters.find(f => f.filterType === 'PRICE_FILTER')?.tickSize || 0),
-        minNotional: parseFloat(symbolInfo.filters.find(f => f.filterType === 'MIN_NOTIONAL')?.minNotional || 0)
-      };
-    } catch (error) {
-      throw new Error(`Failed to get symbol info: ${error.message}`);
-    }
+          return {
+            symbol: symbolInfo.symbol,
+            status: symbolInfo.status,
+            baseAsset: symbolInfo.baseAsset,
+            quoteAsset: symbolInfo.quoteAsset,
+            pricePrecision: symbolInfo.quotePrecision,
+            quantityPrecision: symbolInfo.baseAssetPrecision,
+            minQty: parseFloat(symbolInfo.filters.find(f => f.filterType === 'LOT_SIZE')?.minQty || 0),
+            maxQty: parseFloat(symbolInfo.filters.find(f => f.filterType === 'LOT_SIZE')?.maxQty || 0),
+            stepSize: parseFloat(symbolInfo.filters.find(f => f.filterType === 'LOT_SIZE')?.stepSize || 0),
+            minPrice: parseFloat(symbolInfo.filters.find(f => f.filterType === 'PRICE_FILTER')?.minPrice || 0),
+            maxPrice: parseFloat(symbolInfo.filters.find(f => f.filterType === 'PRICE_FILTER')?.maxPrice || 0),
+            tickSize: parseFloat(symbolInfo.filters.find(f => f.filterType === 'PRICE_FILTER')?.tickSize || 0),
+            minNotional: parseFloat(symbolInfo.filters.find(f => f.filterType === 'MIN_NOTIONAL')?.minNotional || 0)
+          };
+        } catch (error) {
+          lastError = error;
+          const statusCode = error.response?.status;
+          
+          // Handle rate limiting (418) and other temporary errors
+          if ((statusCode === 418 || statusCode === 429 || statusCode === 503) && attempt < maxRetries - 1) {
+            const delay = Math.pow(2, attempt) * 1000; // Exponential backoff: 1s, 2s, 4s
+            console.warn(`Rate limited for symbol info ${symbol} (status ${statusCode}), retrying in ${delay}ms (attempt ${attempt + 1}/${maxRetries})`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+            continue;
+          }
+          
+          // For other errors or final retry, break and throw
+          break;
+        }
+      }
+      
+      // Provide more specific error message based on status code
+      const statusCode = lastError.response?.status;
+      let errorMessage = `Failed to get symbol info for ${symbol}`;
+      
+      if (statusCode === 418) {
+        errorMessage += ': Rate limited by Binance (418). Please try again in a few minutes.';
+      } else if (statusCode === 429) {
+        errorMessage += ': Too many requests (429). Please try again later.';
+      } else if (statusCode === 503) {
+        errorMessage += ': Binance service temporarily unavailable (503).';
+      } else {
+        errorMessage += `: ${lastError.message}`;
+      }
+      
+      throw new Error(errorMessage);
+    });
   }
 
   // Place a limit order
