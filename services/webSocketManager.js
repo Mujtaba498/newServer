@@ -1,6 +1,7 @@
 const WebSocket = require('ws');
 const EventEmitter = require('events');
 const crypto = require('crypto');
+const axios = require('axios');
 
 class WebSocketManager extends EventEmitter {
   constructor() {
@@ -42,7 +43,7 @@ class WebSocketManager extends EventEmitter {
     }, 5 * 60 * 1000); // Every 5 minutes
     
     // Initialize shared connection lazily on first subscribe
-    console.log('WebSocket Manager initialized successfully');
+    // console.log('WebSocket Manager initialized successfully');
   }
 
   // Create or ensure shared connection
@@ -58,7 +59,7 @@ class WebSocketManager extends EventEmitter {
     ws.on('open', () => {
       this.connectionStatus = 'connected';
       this.sharedReconnectAttempts = 0;
-      console.log('Shared Binance WebSocket connected');
+      // console.log('Shared Binance WebSocket connected');
       
       // Resubscribe to existing symbols
       if (this.subscribedSymbols.size > 0) {
@@ -88,7 +89,7 @@ class WebSocketManager extends EventEmitter {
     });
     
     ws.on('close', () => {
-      console.log('Shared Binance WebSocket disconnected');
+      // console.log('Shared Binance WebSocket disconnected');
       this.connectionStatus = 'disconnected';
       if (this.pingInterval) {
         clearInterval(this.pingInterval);
@@ -112,7 +113,7 @@ class WebSocketManager extends EventEmitter {
     }
     const delay = this.reconnectDelay * Math.pow(2, this.sharedReconnectAttempts);
     this.sharedReconnectAttempts += 1;
-    console.log(`Reconnecting shared WS in ${delay}ms (attempt ${this.sharedReconnectAttempts})`);
+    // console.log(`Reconnecting shared WS in ${delay}ms (attempt ${this.sharedReconnectAttempts})`);
     setTimeout(() => this.ensureSharedConnection(), delay);
   }
 
@@ -148,7 +149,7 @@ class WebSocketManager extends EventEmitter {
     
     for (const [userId, connection] of this.userConnections.entries()) {
       if (now - connection.lastActivity > staleThreshold) {
-        console.log(`Cleaning up stale connection for user ${userId}`);
+        // console.log(`Cleaning up stale connection for user ${userId}`);
         this.closeUserConnection(userId);
       }
     }
@@ -165,7 +166,7 @@ class WebSocketManager extends EventEmitter {
   }
 
   // Create WebSocket connection for a user
-  async createUserConnection(userId, apiKey, secretKey) {
+  async createUserConnection(userId, apiKey, secretKey, proxy = null) {
     try {
       // Close existing connection if any
       if (this.userConnections.has(userId)) {
@@ -173,11 +174,12 @@ class WebSocketManager extends EventEmitter {
       }
 
       // Create listen key for user stream
-      const listenKey = await this.createListenKey(apiKey, secretKey);
+      const listenKey = await this.createListenKey(apiKey, secretKey, proxy);
       
       // Create WebSocket connection
       const wsUrl = `wss://stream.binance.com:9443/ws/${listenKey}`;
-      const ws = new WebSocket(wsUrl);
+      const wsOptions = proxy ? { agent: proxy.httpsAgent } : {};
+      const ws = new WebSocket(wsUrl, wsOptions);
       
       // Store connection
       this.userConnections.set(userId, {
@@ -186,14 +188,16 @@ class WebSocketManager extends EventEmitter {
         secretKey,
         listenKey,
         lastPing: Date.now(),
+        lastActivity: Date.now(),
         symbols: new Set(),
-        isConnected: false
+        isConnected: false,
+        proxy
       });
 
       // Setup connection handlers
       this.setupConnectionHandlers(userId, ws);
       
-      console.log(`WebSocket connection created for user ${userId}`);
+      // console.log(`WebSocket connection created for user ${userId}`);
       return true;
     } catch (error) {
       console.error(`Failed to create WebSocket connection for user ${userId}:`, error.message);
@@ -206,7 +210,7 @@ class WebSocketManager extends EventEmitter {
     const connection = this.userConnections.get(userId);
     
     ws.on('open', () => {
-      console.log(`WebSocket connected for user ${userId}`);
+      // console.log(`WebSocket connected for user ${userId}`);
       connection.isConnected = true;
       // reset per-user reconnect attempts
       this.reconnectAttempts.set(userId, 0);
@@ -216,10 +220,9 @@ class WebSocketManager extends EventEmitter {
     });
 
     ws.on('message', (data) => {
-      connection.lastActivity = Date.now();
-      
       try {
         const message = JSON.parse(data);
+        connection.lastActivity = Date.now();
         this.handleWebSocketMessage(userId, message);
       } catch (error) {
         console.error(`Error parsing WebSocket message for user ${userId}:`, error.message);
@@ -227,9 +230,17 @@ class WebSocketManager extends EventEmitter {
     });
 
     ws.on('close', () => {
-      console.log(`WebSocket disconnected for user ${userId}`);
+      // console.log(`WebSocket disconnected for user ${userId}`);
       connection.isConnected = false;
-      this.handleReconnection(userId);
+      
+      // Auto-reconnect logic (optional)
+      const attempts = this.reconnectAttempts.get(userId) || 0;
+      if (attempts < this.maxReconnectAttempts) {
+        this.reconnectAttempts.set(userId, attempts + 1);
+        setTimeout(() => {
+          this.handleReconnection(userId);
+        }, this.reconnectDelay);
+      }
     });
 
     ws.on('error', (error) => {
@@ -237,193 +248,208 @@ class WebSocketManager extends EventEmitter {
       connection.isConnected = false;
     });
 
-    // Set up ping/pong to keep connection alive
-    const pingInterval = setInterval(() => {
+    // Set up ping-pong for connection health
+    setInterval(() => {
       if (ws.readyState === WebSocket.OPEN) {
         ws.ping();
         connection.lastPing = Date.now();
-      } else {
-        clearInterval(pingInterval);
       }
-    }, 30000); // Ping every 30 seconds
+    }, 30000);
   }
 
-  // Handle WebSocket messages
+  // Handle incoming WebSocket messages
   handleWebSocketMessage(userId, message) {
-    // Handle 24hr ticker data
-    if (message.e === '24hrTicker') {
-      // Update price data
-      this.updatePriceData(message.s, {
-        symbol: message.s,
-        price: parseFloat(message.c),
-        priceChange: parseFloat(message.P),
-        volume: parseFloat(message.v),
-        high: parseFloat(message.h),
-        low: parseFloat(message.l),
-        timestamp: message.E
-      });
-    } else if (message.e === 'kline') {
-      // Handle kline (candlestick) data
-      const kline = message.k;
-      this.updatePriceData(kline.s, {
-        symbol: kline.s,
-        price: parseFloat(kline.c),
-        open: parseFloat(kline.o),
-        high: parseFloat(kline.h),
-        low: parseFloat(kline.l),
-        volume: parseFloat(kline.v),
-        timestamp: kline.T
-      });
-    } else if (message.e === 'executionReport') {
-      // Handle order execution reports
+    // Handle order updates and account updates
+    if (message.e === 'executionReport') {
+      // Order execution report
       this.emit('orderUpdate', {
         userId,
-        orderId: message.i,
         symbol: message.s,
+        orderId: message.i,
+        clientOrderId: message.c,
         side: message.S,
+        orderType: message.o,
+        quantity: message.q,
+        price: message.p,
+        executedQty: message.z,
         status: message.X,
-        executedQty: parseFloat(message.z),
-        price: parseFloat(message.p)
+        timestamp: message.T
+      });
+    } else if (message.e === 'outboundAccountPosition') {
+      // Account balance update
+      this.emit('balanceUpdate', {
+        userId,
+        eventTime: message.E,
+        balances: message.B
       });
     }
   }
 
-  // Update price data and emit events
+  // Update price data from shared connection
   updatePriceData(symbol, data) {
     this.priceStreams.set(symbol, data);
-    this.emit('priceUpdate', { symbol, data });
   }
 
-  // Subscribe to a symbol
+  // Subscribe to symbol for a user (enhanced to use shared connection)
   async subscribeToSymbol(userId, symbol) {
-    const connection = this.userConnections.get(userId);
-    // Add to shared tracking
-    const users = this.symbolUsers.get(symbol) || new Set();
-    if (userId) users.add(userId);
-    this.symbolUsers.set(symbol, users);
-    
     // Ensure shared connection is available
-    this.ensureSharedConnection();
-    
-    // If already subscribed, nothing more to do
-    if (this.subscribedSymbols.has(symbol)) {
-      return true;
+    if (!this.ensureSharedConnection()) {
+      // console.log(`Shared connection not ready, will retry for ${symbol}`);
+      return false;
     }
 
-    this.subscribedSymbols.add(symbol);
+    // Add symbol to user's interest
+    const connection = this.userConnections.get(userId);
+    if (connection) {
+      connection.symbols.add(symbol);
+    }
 
-    if (this.sharedConnection && this.sharedConnection.readyState === WebSocket.OPEN) {
-      try {
-        // Subscribe to ticker and kline data
-        const tickerParam = `${symbol.toLowerCase()}@ticker`;
-        const klineParam = `${symbol.toLowerCase()}@kline_1m`;
-        
-        this.sharedConnection.send(JSON.stringify({
-          method: 'SUBSCRIBE',
-          params: [tickerParam, klineParam],
-          id: Date.now()
-        }));
-        
-        console.log(`Subscribed to ${symbol} ticker and kline data via shared connection`);
-        return true;
-      } catch (err) {
-        console.warn(`Shared subscribe failed for ${symbol}: ${err.message}`);
-        return false;
+    // Subscribe via shared connection if not already subscribed
+    if (!this.subscribedSymbols.has(symbol)) {
+      this.subscribedSymbols.add(symbol);
+      
+      if (this.sharedConnection && this.sharedConnection.readyState === WebSocket.OPEN) {
+        try {
+          // Subscribe to ticker and kline streams
+          this.sharedConnection.send(JSON.stringify({
+            method: 'SUBSCRIBE',
+            params: [`${symbol.toLowerCase()}@ticker`, `${symbol.toLowerCase()}@kline_1m`],
+            id: Date.now()
+          }));
+          // console.log(`Subscribed to ${symbol} ticker and kline data via shared connection`);
+        } catch (err) {
+          console.warn(`Shared subscribe failed for ${symbol}: ${err.message}`);
+        }
       }
     }
-    return false;
   }
   
-  // Unsubscribe from a symbol
+  // Unsubscribe from symbol
   unsubscribeSymbol(symbol, userId = null) {
     if (userId) {
-      const users = this.symbolUsers.get(symbol);
-      if (users) {
-        users.delete(userId);
-        if (users.size === 0) this.symbolUsers.delete(symbol);
+      // Remove from specific user's interests
+      const connection = this.userConnections.get(userId);
+      if (connection) {
+        connection.symbols.delete(symbol);
       }
-    }
-
-    if (this.symbolUsers.has(symbol)) return; // still needed
-    if (!this.subscribedSymbols.has(symbol)) return;
-
-    this.subscribedSymbols.delete(symbol);
-    if (this.sharedConnection && this.sharedConnection.readyState === WebSocket.OPEN) {
-      try {
-        const tickerParam = `${symbol.toLowerCase()}@ticker`;
-        const klineParam = `${symbol.toLowerCase()}@kline_1m`;
+      
+      // Check if any other user is still interested
+      let stillNeeded = false;
+      for (const [, conn] of this.userConnections) {
+        if (conn.symbols.has(symbol)) {
+          stillNeeded = true;
+          break;
+        }
+      }
+      
+      if (!stillNeeded) {
+        // Unsubscribe from shared connection
+        this.subscribedSymbols.delete(symbol);
+        this.priceStreams.delete(symbol);
         
-        this.sharedConnection.send(JSON.stringify({
-          method: 'UNSUBSCRIBE',
-          params: [tickerParam, klineParam],
-          id: Date.now()
-        }));
-        
-        console.log(`Unsubscribed from ${symbol} shared streams`);
-      } catch (err) {
-        console.warn(`Shared unsubscribe failed for ${symbol}: ${err.message}`);
+        if (this.sharedConnection && this.sharedConnection.readyState === WebSocket.OPEN) {
+          this.sharedConnection.send(JSON.stringify({
+            method: 'UNSUBSCRIBE',
+            params: [`${symbol.toLowerCase()}@ticker`, `${symbol.toLowerCase()}@kline_1m`],
+            id: Date.now()
+          }));
+          // console.log(`Unsubscribed from ${symbol} shared streams`);
+        }
       }
     }
   }
 
-  // Subscribe to user's symbols (when user connection opens)
+  // Subscribe to all symbols for a user
   subscribeToUserSymbols(userId) {
     const connection = this.userConnections.get(userId);
-    if (!connection) return;
-
-    // Subscribe to each symbol the user is interested in
-    connection.symbols.forEach(symbol => {
-      this.subscribeToSymbol(userId, symbol);
-    });
-  }
-
-  // Get cached price data for a symbol
-  getCachedPrice(symbol) {
-    return this.priceStreams.get(symbol.toUpperCase());
-  }
-
-  // Handle reconnection for a user
-  async handleReconnection(userId) {
-    const attempts = this.reconnectAttempts.get(userId) || 0;
-
-    if (attempts < this.maxReconnectAttempts) {
-      this.reconnectAttempts.set(userId, attempts + 1);
-
-      console.log(`Attempting to reconnect user ${userId} (attempt ${attempts + 1})`);
-
-      setTimeout(async () => {
-        const connection = this.userConnections.get(userId);
-        if (connection) {
-          await this.createUserConnection(userId, connection.apiKey, connection.secretKey);
-        }
-      }, this.reconnectDelay * Math.pow(2, attempts)); // Exponential backoff
-    } else {
-      console.error(`Max reconnection attempts reached for user ${userId}`);
-      this.userConnections.delete(userId);
-      this.reconnectAttempts.set(userId, 0);
+    if (connection && connection.symbols.size > 0) {
+      connection.symbols.forEach(symbol => {
+        this.subscribeToSymbol(userId, symbol);
+      });
     }
   }
 
-  // duplicate closeUserConnection removed (handled earlier in class)
+  // Get cached price data
+  getCachedPrice(symbol) {
+    return this.priceStreams.get(symbol);
+  }
+
+  // Handle reconnection for a specific user
+  async handleReconnection(userId) {
+    const connection = this.userConnections.get(userId);
+    if (!connection) return false;
+
+    try {
+      // console.log(`Attempting to reconnect user ${userId}`);
+      
+      // Create new connection
+      const success = await this.createUserConnection(
+        userId,
+        connection.apiKey,
+        connection.secretKey,
+        connection.proxy
+      );
+      
+      if (success) {
+        // console.log(`Successfully reconnected user ${userId}`);
+        return true;
+      }
+    } catch (error) {
+      console.error(`Reconnection failed for user ${userId}:`, error.message);
+    }
+    
+    return false;
+  }
 
   // Create listen key for user data stream
-  async createListenKey(apiKey, secretKey) {
-    const axios = require('axios');
-    
+  async createListenKey(apiKey, secretKey, proxy = null) {
     try {
-      const response = await axios.post(
+      const timestamp = Date.now();
+      const queryString = `timestamp=${timestamp}`;
+      const signature = crypto.createHmac('sha256', secretKey).update(queryString).digest('hex');
+      
+      // Create axios instance with proxy support if provided
+      const axiosConfig = {
+        headers: {
+          'X-MBX-APIKEY': apiKey
+        },
+        timeout: 10000
+      };
+      
+      if (proxy) {
+        axiosConfig.httpAgent = proxy.httpAgent;
+        axiosConfig.httpsAgent = proxy.httpsAgent;
+        axiosConfig.proxy = false; // Disable axios proxy in favor of agent
+      }
+      
+      const axiosInstance = axios.create(axiosConfig);
+      
+      const response = await axiosInstance.post(
         'https://api.binance.com/api/v3/userDataStream',
-        null, // No data/parameters for this endpoint
+        null,
         {
-          headers: {
-            'X-MBX-APIKEY': apiKey
+          params: {
+            timestamp,
+            signature
           }
         }
       );
       
       return response.data.listenKey;
     } catch (error) {
-      throw new Error(`Failed to create listen key: ${error.response?.data?.msg || error.message}`);
+      const status = error.response?.status;
+      if (status) {
+        console.error(`Failed to create listen key (status ${status}):`, error.response?.data?.msg || error.message);
+      } else {
+        console.error('Failed to create listen key:', error.message);
+      }
+      try {
+        // Inform proxy manager if available to handle cooldowns/rotation
+        const proxyManager = require('./proxyManager');
+        // We don't have userId here directly, so mark a generic event to trigger cooldown on current assignment if any
+        proxyManager.reportEvent('global', { type: 'rest-error', status: status || 'error' });
+      } catch (_) {}
+      throw error;
     }
   }
 
@@ -460,7 +486,7 @@ class WebSocketManager extends EventEmitter {
 
   // Cleanup all connections
   cleanup() {
-    console.log('Cleaning up WebSocket connections...');
+    // console.log('Cleaning up WebSocket connections...');
     this.userConnections.forEach((connection, userId) => {
       this.closeUserConnection(userId);
     });
@@ -468,11 +494,47 @@ class WebSocketManager extends EventEmitter {
     // Reset reconnection tracking structures
     this.reconnectAttempts = new Map();
     this.sharedReconnectAttempts = 0;
+    
+    // Close shared connection
+    if (this.sharedConnection) {
+      this.sharedConnection.close();
+      this.sharedConnection = null;
+    }
+    
+    if (this.pingInterval) {
+      clearInterval(this.pingInterval);
+      this.pingInterval = null;
+    }
+  }
+
+  // Initialize order update listener for immediate opposite order placement
+  initializeOrderUpdateListener() {
+    this.on('orderUpdate', async (data) => {
+      const { userId, symbol, orderId, side, executedQty, status, price } = data;
+      
+      if (status === 'FILLED') {
+        // console.log(`🔔 WebSocket FILLED order detected: ${side} ${executedQty} ${symbol} @ ${price} (ID: ${orderId})`);
+        
+        // Import gridBotService here to avoid circular dependency
+        const gridBotService = require('./gridBotService');
+        
+        try {
+          await gridBotService.handleFilledOrder(userId, symbol, orderId, side, executedQty, price);
+        } catch (error) {
+          console.error(`Error handling filled order ${orderId}:`, error.message);
+        }
+      }
+    });
+    
+    // console.log('🎧 WebSocket orderUpdate listener initialized for immediate opposite order placement');
   }
 }
 
 // Create singleton instance
 const webSocketManager = new WebSocketManager();
+
+// Initialize the WebSocket manager
+webSocketManager.initialize();
 
 // Graceful shutdown handlers
 process.on('SIGINT', () => {

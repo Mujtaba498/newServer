@@ -1,6 +1,7 @@
 const BinanceService = require('./binanceService');
 const GridBot = require('../models/GridBot');
 const webSocketManager = require('./webSocketManager');
+const proxyManager = require('./proxyManager');
 
 class GridBotService {
   constructor() {
@@ -22,29 +23,45 @@ class GridBotService {
         // Only handle FILLED orders
         if (status !== 'FILLED') return;
         
-        console.log(`🔔 WebSocket FILLED order detected: ${side} ${executedQty} ${symbol} @ ${price} (ID: ${orderId})`);
-        
-        // Find the bot that has this order
-        const bot = await this.findBotByOrder(userId, orderId, symbol);
-        if (!bot) {
-          console.log(`No active bot found for order ${orderId} on ${symbol}`);
-          return;
+        async function handleFilledOrder(userId, symbol, orderId, side, executedQty, price) {
+          try {
+            // console.log(`🔔 WebSocket FILLED order detected: ${side} ${executedQty} ${symbol} @ ${price} (ID: ${orderId})`);
+            
+            // Find the bot that contains this order
+            const bot = await findBotByOrder(userId, symbol, orderId);
+            if (!bot) {
+              // console.log(`No active bot found for order ${orderId} on ${symbol}`);
+              return false;
+            }
+            
+            // Find the specific order in the bot
+            const orderIndex = bot.orders.findIndex(o => o.orderId === orderId);
+            if (orderIndex === -1) {
+              // console.log(`Order ${orderId} not found in bot ${bot._id} orders`);
+              return false;
+            }
+            
+            // If this is a liquidation order, don't place an opposite order
+            const filledOrder = bot.orders[orderIndex];
+            if (filledOrder.isLiquidation) {
+              return true;
+            }
+            
+            // console.log(`📈 Processing immediate opposite order for ${side} fill...`);
+            
+            // Create opposite order based on the filled order
+            const success = await createOppositeOrder(bot, filledOrder, parseFloat(executedQty), parseFloat(price));
+            
+            if (success) {
+              // console.log(`✅ Immediate opposite order handling completed for ${orderId}`);
+              return true;
+            }
+            return false;
+          } catch (error) {
+            console.error(`❌ Error in handleFilledOrder: ${error.message}`);
+            return false;
+          }
         }
-        
-        // Find the specific order in the bot
-        const botOrder = bot.orders.find(o => o.orderId.toString() === orderId.toString());
-        if (!botOrder) {
-          console.log(`Order ${orderId} not found in bot ${bot._id} orders`);
-          return;
-        }
-        
-        // Update the order status immediately
-        botOrder.status = 'FILLED';
-        botOrder.isFilled = true;
-        botOrder.filledAt = new Date();
-        botOrder.executedQty = parseFloat(executedQty);
-        
-        console.log(`📈 Processing immediate opposite order for ${side} fill...`);
         
         // Get user Binance service and symbol info
         const userBinance = await this.getUserBinanceService(userId);
@@ -156,9 +173,9 @@ class GridBotService {
       throw new Error('Failed to decrypt user Binance credentials');
     }
 
+    // Proxy assignment is handled inside BinanceService via ProxyManager
     const userBinanceService = new BinanceService(credentials.apiKey, credentials.secretKey, userId);
     this.userBinanceServices.set(key, userBinanceService);
-    
     return userBinanceService;
   }
 

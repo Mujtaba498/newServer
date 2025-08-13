@@ -80,9 +80,10 @@ Based on the current market conditions, volatility, and trading patterns, please
 
 1. UPPER_PRICE: The optimal upper boundary for the grid (should be above current price)
 2. LOWER_PRICE: The optimal lower boundary for the grid (should be below current price)
-3. GRID_LEVELS: Number of grid levels (between 15-50, based on volatility)
+3. GRID_LEVELS: Number of grid levels (between 10-30, based on volatility)
 4. PROFIT_PER_GRID: Profit percentage per grid level (0.5% - 5%, based on volatility)
 5: you also need to do your own research on Market, check for the newses what people thing will be the best range for the coin.
+6: Also check the user budget and suggest the grid levels according to it
 
 
 Considerations:
@@ -194,8 +195,8 @@ Please respond ONLY in the following JSON format (no additional text):
 
   validateGridLevels(gridLevels) {
     const levels = parseInt(gridLevels);
-    if (isNaN(levels) || levels < 5 || levels > 50) {
-      return 10; // Default to 10 levels
+    if (isNaN(levels) || levels < 5 || levels > 100) {
+      return 20; // Default to 20 levels, allowing for more flexibility
     }
     return levels;
   }

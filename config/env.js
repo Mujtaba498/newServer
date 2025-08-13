@@ -46,5 +46,6 @@ module.exports = {
   FRONTEND_URL: process.env.FRONTEND_URL,
   BINANCE_API_KEY: process.env.BINANCE_API_KEY,
   BINANCE_SECRET_KEY: process.env.BINANCE_SECRET_KEY,
+  PROXY_LIST: process.env.PROXY_LIST,
   validateEnvVars
 };

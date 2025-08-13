@@ -2,6 +2,7 @@ const crypto = require('crypto');
 const axios = require('axios');
 const { BINANCE_API_KEY, BINANCE_SECRET_KEY } = require('../config/env');
 const webSocketManager = require('./webSocketManager');
+const proxyManager = require('./proxyManager');
 
 class BinanceService {
   constructor(userApiKey = null, userSecretKey = null, userId = null) {
@@ -24,6 +25,21 @@ class BinanceService {
     this.useWebSocket = true; // Enable WebSocket by default
     this.rateLimitResetTime = null; // Track when rate limit resets
     
+    // NEW: assign proxy and axios instance
+    this.proxy = proxyManager.chooseForUser(userId);
+    this.axios = axios.create(this.proxy ? {
+      httpAgent: this.proxy.httpAgent,
+      httpsAgent: this.proxy.httpsAgent,
+      proxy: false, // disable axios proxy option in favor of agent
+      timeout: 15000,
+    } : { timeout: 15000 });
+
+    // Log assigned proxy IP for this user (once)
+    if (this.userId && this.proxy?.url) {
+      const ip = new URL(this.proxy.url).hostname;
+      console.log(`👤 User ${this.userId} using proxy ${ip}`);
+    }
+    
     // Initialize WebSocket connection if user credentials are provided
     if (this.userId && this.hasCredentials) {
       this.initializeWebSocket();
@@ -34,7 +50,7 @@ class BinanceService {
   async initializeWebSocket() {
     if (this.userId && this.hasCredentials && this.useWebSocket) {
       try {
-        const success = await webSocketManager.createUserConnection(this.userId, this.apiKey, this.secretKey);
+        const success = await webSocketManager.createUserConnection(this.userId, this.apiKey, this.secretKey, this.proxy);
         if (success) {
           console.log(`WebSocket initialized for user ${this.userId}`);
         } else {
@@ -73,9 +89,10 @@ class BinanceService {
   // Get server time
   async getServerTime() {
     try {
-      const response = await axios.get(`${this.baseURL}/api/v3/time`);
+      const response = await this.axios.get(`${this.baseURL}/api/v3/time`);
       return response.data.serverTime;
     } catch (error) {
+      this.reportProxyError(error);
       throw new Error(`Failed to get server time: ${error.message}`);
     }
   }
@@ -87,41 +104,13 @@ class BinanceService {
       const serverTime = await this.getServerTime();
       this.timeOffset = serverTime - localTime;
       this.lastSyncTime = localTime;
-      console.log(`Time synchronized. Offset: ${this.timeOffset}ms`);
+      // Reduced noisy log
+      // console.log(`Time synchronized. Offset: ${this.timeOffset}ms`);
       return this.timeOffset;
     } catch (error) {
       console.error(`Failed to sync server time: ${error.message}`);
       throw error;
     }
-  }
-
-  // Get synchronized timestamp
-  async getSyncedTimestamp() {
-    // Ensure service is initialized
-    if (!this.initialized) {
-      await this.initialize();
-    }
-    
-    const now = Date.now();
-    
-    // Check if we need to sync time (first time or after sync interval)
-    if (this.lastSyncTime === 0 || (now - this.lastSyncTime) > this.syncInterval) {
-      try {
-        await this.syncServerTime();
-      } catch (error) {
-        console.warn(`Time sync failed, using cached offset: ${error.message}`);
-      }
-    }
-    
-    return now + this.timeOffset;
-  }
-
-  // Check if error is timestamp related
-  isTimestampError(error) {
-    const message = error.response?.data?.msg || error.message || '';
-    return message.includes('Timestamp for this request is outside of the recvWindow') ||
-           message.includes('Invalid timestamp') ||
-           message.includes('Timestamp for this request was');
   }
 
   // Execute request with timestamp retry logic
@@ -136,10 +125,11 @@ class BinanceService {
         
         // If it's a timestamp error and we have retries left, force time sync and retry
         if (this.isTimestampError(error) && attempt < maxRetries) {
-          console.warn(`Timestamp error detected (attempt ${attempt + 1}/${maxRetries + 1}). Forcing time sync...`);
+          // Reduced noisy logs
+          // console.warn(`Timestamp error detected (attempt ${attempt + 1}/${maxRetries + 1}). Forcing time sync...`);
           try {
             await this.syncServerTime();
-            console.log('Time sync completed, retrying request...');
+            // console.log('Time sync completed, retrying request...');
           } catch (syncError) {
             console.error(`Time sync failed: ${syncError.message}`);
           }
@@ -150,7 +140,7 @@ class BinanceService {
         const status = error.response?.status;
         if ((status === 418 || status === 429 || status === 503) && attempt < maxRetries) {
           const delay = Math.pow(2, attempt) * 500; // 0.5s, 1s, 2s
-          console.warn(`Transient Binance error ${status}, retrying in ${delay}ms (attempt ${attempt + 1}/${maxRetries + 1})`);
+          // console.warn(`Transient Binance error ${status}, retrying in ${delay}ms (attempt ${attempt + 1}/${maxRetries + 1})`);
           await new Promise(resolve => setTimeout(resolve, delay));
           continue;
         }
@@ -174,7 +164,7 @@ class BinanceService {
         const queryString = `timestamp=${timestamp}&recvWindow=${this.recvWindow}`;
         const signature = this.createSignature(queryString);
 
-        const response = await axios.get(`${this.baseURL}/api/v3/account`, {
+        const response = await this.axios.get(`${this.baseURL}/api/v3/account`, {
           headers: {
             'X-MBX-APIKEY': this.apiKey
           },
@@ -187,6 +177,7 @@ class BinanceService {
 
         return response.data;
       } catch (error) {
+        this.reportProxyError(error);
         throw new Error(`Failed to get account info: ${error.response?.data?.msg || error.message}`);
       }
     });
@@ -198,7 +189,7 @@ class BinanceService {
     if (this.useWebSocket) {
       const cachedPrice = webSocketManager.getCachedPrice(symbol);
       if (cachedPrice && cachedPrice.price) {
-        console.log(`Using WebSocket price for ${symbol}: ${cachedPrice.price}`);
+        // console.log(`Using WebSocket price for ${symbol}: ${cachedPrice.price}`);
         return cachedPrice.price;
       }
       
@@ -212,7 +203,7 @@ class BinanceService {
         
         const updatedPrice = webSocketManager.getCachedPrice(symbol);
         if (updatedPrice && updatedPrice.price) {
-          console.log(`Using updated WebSocket price for ${symbol}: ${updatedPrice.price}`);
+          // console.log(`Using updated WebSocket price for ${symbol}: ${updatedPrice.price}`);
           return updatedPrice.price;
         }
       } catch (wsError) {
@@ -230,40 +221,31 @@ class BinanceService {
         for (let u = 0; u < urlsToTry.length; u++) {
           const base = urlsToTry[(this.currentUrlIndex + u) % urlsToTry.length];
           try {
-            const response = await axios.get(`${base}/api/v3/ticker/price`, {
+            const response = await this.axios.get(`${base}/api/v3/ticker/price`, {
               params: { symbol },
               timeout: 10000
             });
-            // If success, update current index to this base for future calls
             this.currentUrlIndex = (this.currentUrlIndex + u) % urlsToTry.length;
             return parseFloat(response.data.price);
           } catch (innerErr) {
             lastInnerError = innerErr;
             const innerStatus = innerErr.response?.status;
-            // On 418/429/503, continue to next fallback URL
             if (innerStatus === 418 || innerStatus === 429 || innerStatus === 503) {
-              console.warn(`Base ${base} failed with ${innerStatus}, trying next fallback for ${symbol}...`);
+              this.reportProxyError(innerErr);
               continue;
             }
-            // For other errors, break and throw
             break;
           }
         }
-        // If all URLs failed, throw the last error
         throw lastInnerError;
       } catch (error) {
         lastError = error;
         const statusCode = error.response?.status;
-        
-        // Handle rate limiting (418) and other temporary errors
         if ((statusCode === 418 || statusCode === 429 || statusCode === 503) && attempt < maxRetries - 1) {
-          const delay = Math.pow(2, attempt) * 1000; // Exponential backoff: 1s, 2s, 4s
-          console.warn(`Rate limited for ${symbol} (status ${statusCode}), retrying in ${delay}ms (attempt ${attempt + 1}/${maxRetries})`);
+          const delay = Math.pow(2, attempt) * 1000;
           await new Promise(resolve => setTimeout(resolve, delay));
           continue;
         }
-        
-        // For other errors or final retry, break and throw
         break;
       }
     }
@@ -286,74 +268,34 @@ class BinanceService {
   }
 
   // Get symbol info (for precision, min quantity, etc.)
-  async getSymbolInfo(symbol, maxRetries = 3) {
-    return await this.executeWithTimestampRetry(async () => {
-      let lastError;
+  async getSymbolInfo(symbol) {
+    try {
+      const response = await this.axios.get(`${this.baseURL}/api/v3/exchangeInfo`);
+      const symbolInfo = response.data.symbols.find(s => s.symbol === symbol);
       
-      for (let attempt = 0; attempt < maxRetries; attempt++) {
-        try {
-          // Try different base URLs if available
-          const urlsToTry = [this.baseURL, ...this.fallbackURLs];
-          const baseUrl = urlsToTry[attempt % urlsToTry.length];
-          
-          const response = await axios.get(`${baseUrl}/api/v3/exchangeInfo`, {
-            timeout: 10000
-          });
-          
-          const symbolInfo = response.data.symbols.find(s => s.symbol === symbol);
-          
-          if (!symbolInfo) {
-            throw new Error(`Symbol ${symbol} not found`);
-          }
+      if (!symbolInfo) {
+        throw new Error(`Symbol ${symbol} not found`);
+      }
 
-          return {
-            symbol: symbolInfo.symbol,
-            status: symbolInfo.status,
-            baseAsset: symbolInfo.baseAsset,
-            quoteAsset: symbolInfo.quoteAsset,
-            pricePrecision: symbolInfo.quotePrecision,
-            quantityPrecision: symbolInfo.baseAssetPrecision,
-            minQty: parseFloat(symbolInfo.filters.find(f => f.filterType === 'LOT_SIZE')?.minQty || 0),
-            maxQty: parseFloat(symbolInfo.filters.find(f => f.filterType === 'LOT_SIZE')?.maxQty || 0),
-            stepSize: parseFloat(symbolInfo.filters.find(f => f.filterType === 'LOT_SIZE')?.stepSize || 0),
-            minPrice: parseFloat(symbolInfo.filters.find(f => f.filterType === 'PRICE_FILTER')?.minPrice || 0),
-            maxPrice: parseFloat(symbolInfo.filters.find(f => f.filterType === 'PRICE_FILTER')?.maxPrice || 0),
-            tickSize: parseFloat(symbolInfo.filters.find(f => f.filterType === 'PRICE_FILTER')?.tickSize || 0),
-            minNotional: parseFloat(symbolInfo.filters.find(f => f.filterType === 'MIN_NOTIONAL')?.minNotional || 0)
-          };
-        } catch (error) {
-          lastError = error;
-          const statusCode = error.response?.status;
-          
-          // Handle rate limiting (418) and other temporary errors
-          if ((statusCode === 418 || statusCode === 429 || statusCode === 503) && attempt < maxRetries - 1) {
-            const delay = Math.pow(2, attempt) * 1000; // Exponential backoff: 1s, 2s, 4s
-            console.warn(`Rate limited for symbol info ${symbol} (status ${statusCode}), retrying in ${delay}ms (attempt ${attempt + 1}/${maxRetries})`);
-            await new Promise(resolve => setTimeout(resolve, delay));
-            continue;
-          }
-          
-          // For other errors or final retry, break and throw
-          break;
-        }
-      }
-      
-      // Provide more specific error message based on status code
-      const statusCode = lastError.response?.status;
-      let errorMessage = `Failed to get symbol info for ${symbol}`;
-      
-      if (statusCode === 418) {
-        errorMessage += ': Rate limited by Binance (418). Please try again in a few minutes.';
-      } else if (statusCode === 429) {
-        errorMessage += ': Too many requests (429). Please try again later.';
-      } else if (statusCode === 503) {
-        errorMessage += ': Binance service temporarily unavailable (503).';
-      } else {
-        errorMessage += `: ${lastError.message}`;
-      }
-      
-      throw new Error(errorMessage);
-    });
+      return {
+        symbol: symbolInfo.symbol,
+        status: symbolInfo.status,
+        baseAsset: symbolInfo.baseAsset,
+        quoteAsset: symbolInfo.quoteAsset,
+        pricePrecision: symbolInfo.quotePrecision,
+        quantityPrecision: symbolInfo.baseAssetPrecision,
+        minQty: parseFloat(symbolInfo.filters.find(f => f.filterType === 'LOT_SIZE')?.minQty || 0),
+        maxQty: parseFloat(symbolInfo.filters.find(f => f.filterType === 'LOT_SIZE')?.maxQty || 0),
+        stepSize: parseFloat(symbolInfo.filters.find(f => f.filterType === 'LOT_SIZE')?.stepSize || 0),
+        minPrice: parseFloat(symbolInfo.filters.find(f => f.filterType === 'PRICE_FILTER')?.minPrice || 0),
+        maxPrice: parseFloat(symbolInfo.filters.find(f => f.filterType === 'PRICE_FILTER')?.maxPrice || 0),
+        tickSize: parseFloat(symbolInfo.filters.find(f => f.filterType === 'PRICE_FILTER')?.tickSize || 0),
+        minNotional: parseFloat(symbolInfo.filters.find(f => f.filterType === 'MIN_NOTIONAL')?.minNotional || 0)
+      };
+    } catch (error) {
+      this.reportProxyError(error);
+      throw new Error(`Failed to get symbol info: ${error.message}`);
+    }
   }
 
   // Place a limit order
@@ -382,7 +324,7 @@ class BinanceService {
         
         const signature = this.createSignature(queryString);
 
-        const response = await axios.post(`${this.baseURL}/api/v3/order`, null, {
+        const response = await this.axios.post(`${this.baseURL}/api/v3/order`, null, {
           headers: {
             'X-MBX-APIKEY': this.apiKey
           },
@@ -394,6 +336,7 @@ class BinanceService {
 
         return response.data;
       } catch (error) {
+        this.reportProxyError(error);
         throw new Error(`Failed to place order: ${error.response?.data?.msg || error.message}`);
       }
     });
@@ -423,7 +366,7 @@ class BinanceService {
       
       const signature = this.createSignature(queryString);
 
-      const response = await axios.post(`${this.baseURL}/api/v3/order`, null, {
+      const response = await this.axios.post(`${this.baseURL}/api/v3/order`, null, {
         headers: {
           'X-MBX-APIKEY': this.apiKey
         },
@@ -435,6 +378,7 @@ class BinanceService {
 
         return response.data;
       } catch (error) {
+        this.reportProxyError(error);
         throw new Error(`Failed to place market order: ${error.response?.data?.msg || error.message}`);
       }
     });
@@ -462,7 +406,7 @@ class BinanceService {
         
         const signature = this.createSignature(queryString);
 
-        const response = await axios.delete(`${this.baseURL}/api/v3/order`, {
+        const response = await this.axios.delete(`${this.baseURL}/api/v3/order`, {
           headers: {
             'X-MBX-APIKEY': this.apiKey
           },
@@ -474,6 +418,7 @@ class BinanceService {
 
         return response.data;
       } catch (error) {
+        this.reportProxyError(error);
         throw new Error(`Failed to cancel order: ${error.response?.data?.msg || error.message}`);
       }
     });
@@ -501,7 +446,7 @@ class BinanceService {
         
         const signature = this.createSignature(queryString);
 
-        const response = await axios.get(`${this.baseURL}/api/v3/order`, {
+        const response = await this.axios.get(`${this.baseURL}/api/v3/order`, {
           headers: {
             'X-MBX-APIKEY': this.apiKey
           },
@@ -513,6 +458,7 @@ class BinanceService {
 
         return response.data;
       } catch (error) {
+        this.reportProxyError(error);
         throw new Error(`Failed to get order status: ${error.response?.data?.msg || error.message}`);
       }
     });
@@ -539,7 +485,7 @@ class BinanceService {
         
         const signature = this.createSignature(queryString);
 
-        const response = await axios.get(`${this.baseURL}/api/v3/openOrders`, {
+        const response = await this.axios.get(`${this.baseURL}/api/v3/openOrders`, {
           headers: {
             'X-MBX-APIKEY': this.apiKey
           },
@@ -551,6 +497,7 @@ class BinanceService {
 
         return response.data;
       } catch (error) {
+        this.reportProxyError(error);
         throw new Error(`Failed to get open orders: ${error.response?.data?.msg || error.message}`);
       }
     });
@@ -565,14 +512,9 @@ class BinanceService {
     try {
       const accountInfo = await this.getAccountInfo();
       const balance = accountInfo.balances.find(b => b.asset === asset);
-      
-      return {
-        asset,
-        free: parseFloat(balance?.free || 0),
-        locked: parseFloat(balance?.locked || 0),
-        total: parseFloat(balance?.free || 0) + parseFloat(balance?.locked || 0)
-      };
+      return { asset, free: parseFloat(balance?.free || 0), locked: parseFloat(balance?.locked || 0), total: parseFloat(balance?.free || 0) + parseFloat(balance?.locked || 0) };
     } catch (error) {
+      this.reportProxyError(error);
       throw new Error(`Failed to get balance for ${asset}: ${error.message}`);
     }
   }
@@ -583,7 +525,7 @@ class BinanceService {
     if (this.useWebSocket && this.userId) {
       const cachedData = webSocketManager.getCachedPrice(symbol);
       if (cachedData && cachedData.priceChange !== undefined) {
-        console.log(`Using WebSocket ticker data for ${symbol}`);
+        // console.log(`Using WebSocket ticker data for ${symbol}`);
         return {
           symbol: cachedData.symbol,
           priceChange: cachedData.priceChange || 0,
@@ -603,7 +545,7 @@ class BinanceService {
     
     // Fallback to REST API
     try {
-      const response = await axios.get(`${this.baseURL}/api/v3/ticker/24hr?symbol=${symbol}`);
+      const response = await this.axios.get(`${this.baseURL}/api/v3/ticker/24hr?symbol=${symbol}`);
       return {
         symbol: response.data.symbol,
         priceChange: parseFloat(response.data.priceChange),
@@ -624,6 +566,7 @@ class BinanceService {
         count: response.data.count
       };
     } catch (error) {
+      this.reportProxyError(error);
       throw new Error(`Failed to get 24hr ticker: ${error.message}`);
     }
   }
@@ -631,9 +574,9 @@ class BinanceService {
   // Get all available trading symbols
   async getAllSymbols() {
     try {
-      const response = await axios.get(`${this.baseURL}/api/v3/exchangeInfo`);
+      const response = await this.axios.get(`${this.baseURL}/api/v3/exchangeInfo`);
       const symbols = response.data.symbols
-        .filter(symbol => symbol.status === 'TRADING') // Only active trading pairs
+        .filter(symbol => symbol.status === 'TRADING')
         .map(symbol => ({
           symbol: symbol.symbol,
           baseAsset: symbol.baseAsset,
@@ -645,27 +588,78 @@ class BinanceService {
           minNotional: parseFloat(symbol.filters.find(f => f.filterType === 'MIN_NOTIONAL')?.minNotional || 0),
           tickSize: parseFloat(symbol.filters.find(f => f.filterType === 'PRICE_FILTER')?.tickSize || 0)
         }));
-      
       return symbols;
     } catch (error) {
+      this.reportProxyError(error);
       throw new Error(`Failed to get all symbols: ${error.message}`);
     }
   }
 
-  // Test API credentials by making a simple authenticated request
+  // Get synced timestamp
+  async getSyncedTimestamp() {
+    // Check if we need to sync time
+    const now = Date.now();
+    if (now - this.lastSyncTime > this.syncInterval) {
+      try {
+        await this.syncServerTime();
+      } catch (error) {
+        console.warn(`Time sync failed: ${error.message}, using cached offset`);
+      }
+    }
+    
+    return now + this.timeOffset;
+  }
+
+  // Check if error is a timestamp-related error
+  isTimestampError(error) {
+    const errorCode = error.response?.data?.code;
+    const errorMsg = error.response?.data?.msg || error.message || '';
+    
+    // Binance timestamp error codes
+    return errorCode === -1021 || // Timestamp outside recv window
+           errorCode === -1022 || // Invalid signature (often timestamp related)
+           errorMsg.includes('Timestamp') ||
+           errorMsg.includes('recvWindow') ||
+           errorMsg.includes('time') ||
+           errorMsg.includes('signature');
+  }
+
+  // NEW: report proxy errors to ProxyManager
+  reportProxyError(error) {
+    const status = error?.response?.status;
+    if (status === 418 || status === 429 || status === 503) {
+      proxyManager.reportEvent(this.userId, { type: 'rest-error', status });
+    } else if (status === 451) {
+      // HTTP 451: Unavailable For Legal Reasons (banned region)
+      console.warn(`🚫 Proxy banned in region (451) for user ${this.userId}`);
+      proxyManager.reportEvent(this.userId, { type: 'rest-error', status: 451 });
+    } else if (error?.code === 'ECONNABORTED' || error?.message?.includes('timeout')) {
+      proxyManager.reportEvent(this.userId, { type: 'rest-error', status: 'timeout' });
+    }
+  }
+
+  // Test API credentials by attempting to fetch account info
   async testCredentials(apiKey, secretKey) {
+    // Temporarily override credentials for testing
+    const originalApiKey = this.apiKey;
+    const originalSecretKey = this.secretKey;
+    const originalHasCredentials = this.hasCredentials;
+    
     try {
-      // Create a temporary instance with the provided credentials
-      const tempService = new BinanceService(apiKey, secretKey);
-      await tempService.initialize();
+      this.apiKey = apiKey;
+      this.secretKey = secretKey;
+      this.hasCredentials = !!(apiKey && secretKey);
       
-      // Try to get account info to validate credentials
-      await tempService.getAccountInfo();
-      
+      // Test by getting account info
+      await this.getAccountInfo();
       return true;
     } catch (error) {
-      console.error('Credential test failed:', error.message);
-      throw new Error('Invalid API credentials');
+      throw new Error(`Invalid credentials: ${error.message}`);
+    } finally {
+      // Restore original credentials
+      this.apiKey = originalApiKey;
+      this.secretKey = originalSecretKey;
+      this.hasCredentials = originalHasCredentials;
     }
   }
 }
