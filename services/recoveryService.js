@@ -71,6 +71,15 @@ class RecoveryService {
 
       const userBinance = new BinanceService(credentials.apiKey, credentials.secretKey, bot.userId);
       
+      // **CRITICAL: Ensure WebSocket connection is active for this user**
+      const webSocketManager = require('./webSocketManager');
+      try {
+        await webSocketManager.createUserConnection(bot.userId, credentials.apiKey, credentials.secretKey);
+        console.log(`🔌 WebSocket connection ensured for user ${bot.userId} during recovery`);
+      } catch (wsError) {
+        console.warn(`⚠️ WebSocket connection failed for user ${bot.userId}: ${wsError.message}`);
+      }
+      
       // Sync order status with Binance to get latest state
       await this.syncOrderStatus(bot, userBinance);
       
@@ -94,6 +103,26 @@ class RecoveryService {
       // Resume bot operation
       bot.status = 'active';
       await bot.save();
+
+      // **CRITICAL FIX: Ensure bot is added to active monitoring after recovery**
+      const GridBotService = require('./gridBotService');
+      const gridBotService = new GridBotService();
+      
+      // Add bot to active monitoring if not already there
+      if (!gridBotService.activeBots.has(bot._id.toString())) {
+        gridBotService.activeBots.set(bot._id.toString(), bot);
+        
+        // Start monitoring interval for this bot
+        const monitorInterval = setInterval(() => {
+          gridBotService.monitorGridOrders(bot._id.toString()).catch(error => {
+            console.error(`Monitoring error for recovered bot ${bot._id}:`, error.message);
+          });
+        }, 1000); // Check every 1 second
+        
+        gridBotService.intervals.set(bot._id.toString(), monitorInterval);
+        
+        console.log(`🔄 Added recovered bot ${bot._id} to active monitoring`);
+      }
 
     } catch (error) {
       console.error(`Failed to recover bot ${bot._id}:`, error.message);
@@ -123,6 +152,39 @@ class RecoveryService {
           order.executedQty = parseFloat(binanceOrder.executedQty);
           order.cummulativeQuoteQty = parseFloat(binanceOrder.cummulativeQuoteQty);
           order.updatedAt = new Date();
+          
+          // **CRITICAL: Capture actual executed price for accurate recovery calculations**
+          if (binanceOrder.fills && binanceOrder.fills.length > 0) {
+            // Calculate weighted average executed price from fills
+            let totalQuantity = 0;
+            let totalValue = 0;
+            let totalCommission = 0;
+            let commissionAsset = null;
+            
+            for (const fill of binanceOrder.fills) {
+              const fillQty = parseFloat(fill.qty);
+              const fillPrice = parseFloat(fill.price);
+              totalQuantity += fillQty;
+              totalValue += fillQty * fillPrice;
+              totalCommission += parseFloat(fill.commission || 0);
+              commissionAsset = fill.commissionAsset;
+            }
+            
+            // Calculate weighted average executed price
+            if (totalQuantity > 0) {
+              order.executedPrice = totalValue / totalQuantity;
+              console.log(`📊 Order ${order.orderId} executed at average price: ${order.executedPrice}`);
+            }
+            
+            order.commission = totalCommission;
+            order.commissionAsset = commissionAsset;
+            
+            console.log(`📊 Order ${order.orderId} commission: ${totalCommission} ${commissionAsset}`);
+          } else if (binanceOrder.status === 'FILLED') {
+            // Fallback: use order price if no fills data available
+            order.executedPrice = parseFloat(binanceOrder.price);
+            console.log(`📊 Order ${order.orderId} using order price as executed price: ${order.executedPrice}`);
+          }
           
           // Mark as filled if completely filled
           if (binanceOrder.status === 'FILLED' && !order.isFilled) {
@@ -172,7 +234,7 @@ class RecoveryService {
         
         missingSellOrders.push({
           buyOrder,
-          expectedSellPrice: this.calculateSellPrice(bot, buyOrder.gridLevel)
+          expectedSellPrice: this.calculateSellPrice(bot, buyOrder)
         });
         
         // Reset the flag to reflect reality
@@ -202,14 +264,36 @@ class RecoveryService {
   }
 
   /**
-   * Calculate expected sell price for a grid level
+   * Calculate expected sell price based on actual buy price + profit margin
    */
-  calculateSellPrice(bot, gridLevel) {
+  calculateSellPrice(bot, buyOrder) {
     const config = bot.config;
-    const priceRange = config.upperPrice - config.lowerPrice;
-    const stepSize = priceRange / config.gridLevels;
+    const profitMargin = config.profitPerGrid / 100;
     
-    return config.lowerPrice + (gridLevel * stepSize) * (1 + config.profitPerGrid / 100);
+    // **CRITICAL FIX: Use actual buy price, not grid level calculation**
+    // Get the actual executed price from the buy order
+    const actualBuyPrice = buyOrder.executedPrice || buyOrder.price;
+    
+    // Calculate sell price with profit margin
+    const sellPrice = actualBuyPrice * (1 + profitMargin);
+    
+    console.log(`💰 Recovery sell price calculation:`);
+    console.log(`   Buy Price: ${actualBuyPrice}`);
+    console.log(`   Profit Margin: ${profitMargin * 100}%`);
+    console.log(`   Sell Price: ${sellPrice}`);
+    
+    // Ensure sell price is within grid range (safety check)
+    if (sellPrice > config.upperPrice) {
+      console.warn(`⚠️ Calculated sell price ${sellPrice} exceeds upper grid limit ${config.upperPrice}, using upper limit`);
+      return config.upperPrice;
+    }
+    
+    if (sellPrice < config.lowerPrice) {
+      console.warn(`⚠️ Calculated sell price ${sellPrice} below lower grid limit ${config.lowerPrice}, using lower limit + margin`);
+      return config.lowerPrice * (1 + profitMargin);
+    }
+    
+    return sellPrice;
   }
 
   /**
@@ -225,13 +309,36 @@ class RecoveryService {
         // Get symbol filters for proper rounding and validations
         const symbolInfo = await userBinance.getSymbolInfo(bot.symbol);
 
-        // Use the original filled quantity from the BUY for recovery, as requested
+        // **FIX: Account for trading fees deducted from purchased asset**
+        // When BNB is insufficient, Binance deducts fees from the bought asset
+        // Standard Binance trading fee is 0.1% (0.001)
+        const BINANCE_TRADING_FEE = 0.001; // 0.1%
+        
+        // Use the original filled quantity from the BUY for recovery
         // Prefer executedQty (actual fill), fallback to requested quantity
-        let sellQty = (typeof buyOrder.executedQty === 'number' && buyOrder.executedQty > 0)
+        let rawSellQty = (typeof buyOrder.executedQty === 'number' && buyOrder.executedQty > 0)
           ? buyOrder.executedQty
           : buyOrder.quantity;
 
-        console.log(`Using buy order quantity for recovery sell. Raw: ${sellQty} (executedQty=${buyOrder.executedQty}, requested=${buyOrder.quantity})`);
+        console.log(`Raw buy order quantity: ${rawSellQty} (executedQty=${buyOrder.executedQty}, requested=${buyOrder.quantity})`);
+
+        // **CRITICAL FIX: Deduct trading fee from the quantity**
+        // If fee was paid in the purchased asset (no BNB), we received less than ordered
+        let sellQty = rawSellQty;
+        
+        // Check if we have commission data from the order
+        if (buyOrder.commission && buyOrder.commission > 0) {
+          // Use actual commission if available
+          sellQty = rawSellQty - buyOrder.commission;
+          console.log(`📊 Using actual commission data: ${buyOrder.commission}, Net quantity: ${sellQty}`);
+        } else {
+          // Estimate fee deduction (assume fee was paid in purchased asset)
+          const estimatedFee = rawSellQty * BINANCE_TRADING_FEE;
+          sellQty = rawSellQty - estimatedFee;
+          console.log(`📊 Estimated trading fee: ${estimatedFee} (${BINANCE_TRADING_FEE * 100}%), Net quantity: ${sellQty}`);
+        }
+
+        console.log(`🔧 Fee-adjusted sell quantity: ${sellQty} (original: ${rawSellQty})`);
 
         // Round DOWN to step size (LOT_SIZE) and to quantity precision to avoid invalid quantities
         if (symbolInfo.stepSize > 0) {

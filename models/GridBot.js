@@ -168,6 +168,9 @@ const gridBotSchema = new mongoose.Schema({
       type: Number,
       default: 0
     },
+    commissionAsset: {
+      type: String
+    },
     isFilled: {
       type: Boolean,
       default: false

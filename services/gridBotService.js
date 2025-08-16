@@ -397,6 +397,28 @@ class GridBotService {
               bot.orders[orderIndex].isFilled = true;
               bot.orders[orderIndex].filledAt = new Date();
               bot.orders[orderIndex].executedQty = parseFloat(orderStatus.executedQty);
+              
+              // **CRITICAL: Capture executed price for accurate profit calculations**
+              if (orderStatus.fills && orderStatus.fills.length > 0) {
+                // Calculate weighted average executed price from fills
+                let totalQuantity = 0;
+                let totalValue = 0;
+                
+                for (const fill of orderStatus.fills) {
+                  const fillQty = parseFloat(fill.qty);
+                  const fillPrice = parseFloat(fill.price);
+                  totalQuantity += fillQty;
+                  totalValue += fillQty * fillPrice;
+                }
+                
+                if (totalQuantity > 0) {
+                  bot.orders[orderIndex].executedPrice = totalValue / totalQuantity;
+                  console.log(`📊 Order ${order.orderId} executed at average price: ${bot.orders[orderIndex].executedPrice}`);
+                }
+              } else {
+                // Fallback: use order price if no fills data available
+                bot.orders[orderIndex].executedPrice = parseFloat(orderStatus.price);
+              }
             }
             await this.handleFilledOrder(bot, order, symbolInfo, userBinance);
           }
@@ -453,18 +475,48 @@ class GridBotService {
           console.log(`Waiting for balance update after ${filledOrder.side} order...`);
           await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 2 seconds
           
+          // **FIX: Calculate actual quantity accounting for trading fees**
+          let actualQuantity = filledOrder.quantity;
+          
+          if (oppositeSide === 'SELL' && filledOrder.side === 'BUY') {
+            // For sell orders after buy fills, account for trading fees deducted from purchased asset
+            const BINANCE_TRADING_FEE = 0.001; // 0.1%
+            
+            if (filledOrder.commission && filledOrder.commission > 0 && filledOrder.commissionAsset === symbolInfo.baseAsset) {
+              // Use actual commission if available and paid in base asset
+              actualQuantity = filledOrder.executedQty - filledOrder.commission;
+              console.log(`📊 Using actual commission: ${filledOrder.commission} ${filledOrder.commissionAsset}, Net quantity: ${actualQuantity}`);
+            } else {
+              // Estimate fee deduction for buy orders (assume fee paid in purchased asset)
+              const estimatedFee = filledOrder.executedQty * BINANCE_TRADING_FEE;
+              actualQuantity = filledOrder.executedQty - estimatedFee;
+              console.log(`📊 Estimated trading fee: ${estimatedFee}, Net quantity: ${actualQuantity}`);
+            }
+            
+            // Round down to symbol precision
+            if (symbolInfo.stepSize > 0) {
+              actualQuantity = Math.floor(actualQuantity / symbolInfo.stepSize) * symbolInfo.stepSize;
+            }
+            if (symbolInfo.quantityPrecision >= 0) {
+              const p = Math.pow(10, symbolInfo.quantityPrecision);
+              actualQuantity = Math.floor(actualQuantity * p) / p;
+            }
+            
+            console.log(`🔧 Fee-adjusted sell quantity: ${actualQuantity} (original: ${filledOrder.quantity})`);
+          }
+          
           // **FIX: Check balance before placing opposite order**
           if (oppositeSide === 'SELL') {
             const baseBalance = await userBinance.getAssetBalance(symbolInfo.baseAsset);
-            console.log(`${symbolInfo.baseAsset} balance: ${baseBalance.free}, Required: ${filledOrder.quantity}`);
+            console.log(`${symbolInfo.baseAsset} balance: ${baseBalance.free}, Required: ${actualQuantity}`);
             
-            if (baseBalance.free < filledOrder.quantity) {
-              console.error(`❌ Insufficient ${symbolInfo.baseAsset} balance for sell order. Available: ${baseBalance.free}, Required: ${filledOrder.quantity}`);
+            if (baseBalance.free < actualQuantity) {
+              console.error(`❌ Insufficient ${symbolInfo.baseAsset} balance for sell order. Available: ${baseBalance.free}, Required: ${actualQuantity}`);
               return; // Exit without setting hasCorrespondingSell flag
             }
           } else {
             const quoteBalance = await userBinance.getAssetBalance(symbolInfo.quoteAsset);
-            const requiredAmount = filledOrder.quantity * oppositePrice;
+            const requiredAmount = actualQuantity * oppositePrice;
             console.log(`${symbolInfo.quoteAsset} balance: ${quoteBalance.free}, Required: ${requiredAmount}`);
             
             if (quoteBalance.free < requiredAmount) {
@@ -476,7 +528,7 @@ class GridBotService {
           const oppositeOrder = await userBinance.placeLimitOrder(
             bot.symbol,
             oppositeSide,
-            filledOrder.quantity,
+            actualQuantity,
             oppositePrice
           );
 
@@ -485,7 +537,7 @@ class GridBotService {
             orderId: oppositeOrder.orderId,
             side: oppositeSide,
             price: oppositePrice,
-            quantity: filledOrder.quantity,
+            quantity: actualQuantity,
             status: 'NEW',
             gridLevel: filledOrder.gridLevel
           });
@@ -1276,6 +1328,60 @@ class GridBotService {
     } catch (error) {
       console.error('Error syncing order status with Binance:', error);
       return false;
+    }
+  }
+
+  // **NEW: WebSocket handler for filled orders**
+  async handleWebSocketFilledOrder(userId, symbol, orderId, side, executedQty, price, executedPrice, commission, commissionAsset) {
+    try {
+      console.log(`🔔 WebSocket FILLED order detected: ${side} ${executedQty} ${symbol} @ ${price} (ID: ${orderId})`);
+      
+      // Find the bot that owns this order
+      const bot = await this.findBotByOrder(userId, orderId, symbol);
+      if (!bot) {
+        console.warn(`⚠️ No bot found for filled order ${orderId} (user: ${userId}, symbol: ${symbol})`);
+        return;
+      }
+
+      console.log(`✅ Found bot ${bot._id} for filled order ${orderId}`);
+
+      // Find the specific order in the bot
+      const orderIndex = bot.orders.findIndex(o => o.orderId.toString() === orderId.toString());
+      if (orderIndex === -1) {
+        console.warn(`⚠️ Order ${orderId} not found in bot ${bot._id} orders`);
+        return;
+      }
+
+      const order = bot.orders[orderIndex];
+      
+      // Update order status with WebSocket data
+      order.status = 'FILLED';
+      order.isFilled = true;
+      order.filledAt = new Date();
+      order.executedQty = parseFloat(executedQty);
+      order.executedPrice = parseFloat(executedPrice || price);
+      
+      if (commission && commission > 0) {
+        order.commission = parseFloat(commission);
+        order.commissionAsset = commissionAsset;
+      }
+
+      console.log(`📊 Updated order ${orderId} status to FILLED with executed price: ${order.executedPrice}`);
+
+      // Get user-specific Binance service and symbol info
+      const userBinance = await this.getUserBinanceService(userId);
+      const symbolInfo = await userBinance.getSymbolInfo(symbol);
+
+      // Handle the filled order (place opposite order)
+      await this.handleFilledOrder(bot, order, symbolInfo, userBinance);
+
+      // Save the bot with updated order status
+      await bot.save();
+      
+      console.log(`✅ Successfully processed WebSocket filled order ${orderId} for bot ${bot._id}`);
+
+    } catch (error) {
+      console.error(`❌ Error handling WebSocket filled order ${orderId}:`, error.message);
     }
   }
 }

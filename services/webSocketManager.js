@@ -273,7 +273,12 @@ class WebSocketManager extends EventEmitter {
         price: message.p,
         executedQty: message.z,
         status: message.X,
-        timestamp: message.T
+        timestamp: message.T,
+        // **NEW: Include commission data for fee tracking**
+        commission: parseFloat(message.n || 0),
+        commissionAsset: message.N,
+        // **NEW: Include executed price for accurate recovery calculations**
+        executedPrice: parseFloat(message.L || message.p || 0) // L = last executed price, fallback to order price
       });
     } else if (message.e === 'outboundAccountPosition') {
       // Account balance update
@@ -510,23 +515,34 @@ class WebSocketManager extends EventEmitter {
   // Initialize order update listener for immediate opposite order placement
   initializeOrderUpdateListener() {
     this.on('orderUpdate', async (data) => {
-      const { userId, symbol, orderId, side, executedQty, status, price } = data;
+      const { userId, symbol, orderId, side, executedQty, status, price, executedPrice, commission, commissionAsset } = data;
       
       if (status === 'FILLED') {
-        // console.log(`🔔 WebSocket FILLED order detected: ${side} ${executedQty} ${symbol} @ ${price} (ID: ${orderId})`);
+        console.log(`🔔 WebSocket FILLED order detected: ${side} ${executedQty} ${symbol} @ ${price} (ID: ${orderId})`);
         
         // Import gridBotService here to avoid circular dependency
-        const gridBotService = require('./gridBotService');
+        const GridBotService = require('./gridBotService');
+        const gridBotService = new GridBotService();
         
         try {
-          await gridBotService.handleFilledOrder(userId, symbol, orderId, side, executedQty, price);
+          await gridBotService.handleWebSocketFilledOrder(
+            userId, 
+            symbol, 
+            orderId, 
+            side, 
+            executedQty, 
+            price, 
+            executedPrice, 
+            commission, 
+            commissionAsset
+          );
         } catch (error) {
           console.error(`Error handling filled order ${orderId}:`, error.message);
         }
       }
     });
     
-    // console.log('🎧 WebSocket orderUpdate listener initialized for immediate opposite order placement');
+    console.log('🎧 WebSocket orderUpdate listener initialized for immediate opposite order placement');
   }
 }
 
