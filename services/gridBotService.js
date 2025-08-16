@@ -179,6 +179,21 @@ class GridBotService {
     return userBinanceService;
   }
 
+  // Clear cached Binance service for a user (useful when proxy issues occur)
+  clearUserBinanceService(userId) {
+    const key = userId.toString();
+    if (this.userBinanceServices.has(key)) {
+      console.log(`🗑️ Clearing cached BinanceService for user ${userId}`);
+      this.userBinanceServices.delete(key);
+    }
+  }
+
+  // Get fresh Binance service (bypasses cache)
+  async getFreshUserBinanceService(userId) {
+    this.clearUserBinanceService(userId);
+    return await this.getUserBinanceService(userId);
+  }
+
   // Calculate grid levels and prices
   calculateGridLevels(upperPrice, lowerPrice, gridLevels) {
     const priceRange = upperPrice - lowerPrice;

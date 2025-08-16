@@ -624,17 +624,47 @@ class BinanceService {
            errorMsg.includes('signature');
   }
 
-  // NEW: report proxy errors to ProxyManager
+  // NEW: report proxy errors to ProxyManager and refresh proxy if needed
   reportProxyError(error) {
     const status = error?.response?.status;
     if (status === 418 || status === 429 || status === 503) {
       proxyManager.reportEvent(this.userId, { type: 'rest-error', status });
+      this.refreshProxyAssignment();
     } else if (status === 451) {
       // HTTP 451: Unavailable For Legal Reasons (banned region)
       console.warn(`🚫 Proxy banned in region (451) for user ${this.userId}`);
       proxyManager.reportEvent(this.userId, { type: 'rest-error', status: 451 });
+      this.refreshProxyAssignment();
     } else if (error?.code === 'ECONNABORTED' || error?.message?.includes('timeout')) {
       proxyManager.reportEvent(this.userId, { type: 'rest-error', status: 'timeout' });
+      this.refreshProxyAssignment();
+    }
+  }
+
+  // Refresh proxy assignment and recreate axios instance
+  refreshProxyAssignment() {
+    if (!this.userId) return;
+    
+    console.log(`🔄 Refreshing proxy assignment for user ${this.userId}`);
+    
+    // Get new proxy assignment
+    const newProxy = proxyManager.chooseForUser(this.userId);
+    
+    if (newProxy && newProxy.url !== this.proxy?.url) {
+      this.proxy = newProxy;
+      
+      // Recreate axios instance with new proxy
+      this.axios = axios.create(this.proxy ? {
+        httpAgent: this.proxy.httpAgent,
+        httpsAgent: this.proxy.httpsAgent,
+        proxy: false, // disable axios proxy option in favor of agent
+        timeout: 15000,
+      } : { timeout: 15000 });
+      
+      const ip = new URL(this.proxy.url).hostname;
+      console.log(`✅ User ${this.userId} switched to new proxy ${ip}`);
+    } else if (!newProxy) {
+      console.warn(`⚠️ No healthy proxy available for user ${this.userId}`);
     }
   }
 
