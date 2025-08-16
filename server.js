@@ -20,7 +20,8 @@ connectDB();
 
 // Initialize WebSocket Manager
 webSocketManager.initialize();
-console.log('WebSocket Manager initialized');
+webSocketManager.initializeOrderUpdateListener();
+console.log('WebSocket Manager and order update listener initialized');
 
 const globalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,

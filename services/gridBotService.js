@@ -10,76 +10,12 @@ class GridBotService {
     this.intervals = new Map(); // Store interval timers
     this.userBinanceServices = new Map(); // Store user-specific Binance service instances
     
-    // Set up WebSocket event listener for immediate order handling
-    this.setupWebSocketOrderListener();
+    // WebSocket order listener is now handled by webSocketManager.initializeOrderUpdateListener()
+    // No need for duplicate listener setup here
   }
 
-  // Set up WebSocket event listener for orderUpdate events
-  setupWebSocketOrderListener() {
-    webSocketManager.on('orderUpdate', async (data) => {
-      try {
-        const { userId, orderId, symbol, side, status, executedQty, price } = data;
-        
-        // Only handle FILLED orders
-        if (status !== 'FILLED') return;
-        
-        async function handleFilledOrder(userId, symbol, orderId, side, executedQty, price) {
-          try {
-            // console.log(`🔔 WebSocket FILLED order detected: ${side} ${executedQty} ${symbol} @ ${price} (ID: ${orderId})`);
-            
-            // Find the bot that contains this order
-            const bot = await findBotByOrder(userId, symbol, orderId);
-            if (!bot) {
-              // console.log(`No active bot found for order ${orderId} on ${symbol}`);
-              return false;
-            }
-            
-            // Find the specific order in the bot
-            const orderIndex = bot.orders.findIndex(o => o.orderId === orderId);
-            if (orderIndex === -1) {
-              // console.log(`Order ${orderId} not found in bot ${bot._id} orders`);
-              return false;
-            }
-            
-            // If this is a liquidation order, don't place an opposite order
-            const filledOrder = bot.orders[orderIndex];
-            if (filledOrder.isLiquidation) {
-              return true;
-            }
-            
-            // console.log(`📈 Processing immediate opposite order for ${side} fill...`);
-            
-            // Create opposite order based on the filled order
-            const success = await createOppositeOrder(bot, filledOrder, parseFloat(executedQty), parseFloat(price));
-            
-            if (success) {
-              // console.log(`✅ Immediate opposite order handling completed for ${orderId}`);
-              return true;
-            }
-            return false;
-          } catch (error) {
-            console.error(`❌ Error in handleFilledOrder: ${error.message}`);
-            return false;
-          }
-        }
-        
-        // Get user Binance service and symbol info
-        const userBinance = await this.getUserBinanceService(userId);
-        const symbolInfo = await userBinance.getSymbolInfo(symbol);
-        
-        // Handle the filled order immediately
-        await this.handleFilledOrder(bot, botOrder, symbolInfo, userBinance);
-        
-        await bot.save();
-        console.log(`✅ Immediate opposite order handling completed for ${orderId}`);
-        
-      } catch (error) {
-        console.error('❌ Error handling WebSocket orderUpdate:', error.message);
-      }
-    });
-    
-    console.log('🎧 WebSocket orderUpdate listener initialized for immediate opposite order placement');
-  }
+  // WebSocket order listener is now handled by webSocketManager.initializeOrderUpdateListener()
+  // This method has been removed to avoid duplicate listeners and conflicts
 
   // Find bot by order ID and symbol
   async findBotByOrder(userId, orderId, symbol) {
