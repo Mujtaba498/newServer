@@ -633,7 +633,7 @@ class GridBotService {
         this.monitorGridOrders(botId).catch(error => {
           console.error(`Monitoring error for bot ${botId}:`, error.message);
         });
-      }, 1000); // Check every 1 second for rapid crypto market changes
+      }, 30000); // Check every 30 seconds to avoid rate limits
 
       this.intervals.set(botId, monitorInterval);
       this.activeBots.set(botId, bot);

@@ -409,10 +409,6 @@ class WebSocketManager extends EventEmitter {
   // Create listen key for user data stream
   async createListenKey(apiKey, secretKey, proxy = null) {
     try {
-      const timestamp = Date.now();
-      const queryString = `timestamp=${timestamp}`;
-      const signature = crypto.createHmac('sha256', secretKey).update(queryString).digest('hex');
-      
       // Create axios instance with proxy support if provided
       const axiosConfig = {
         headers: {
@@ -429,15 +425,10 @@ class WebSocketManager extends EventEmitter {
       
       const axiosInstance = axios.create(axiosConfig);
       
+      // The userDataStream endpoint doesn't require any parameters
+      // Only the API key in headers is needed
       const response = await axiosInstance.post(
-        'https://api.binance.com/api/v3/userDataStream',
-        null,
-        {
-          params: {
-            timestamp,
-            signature
-          }
-        }
+        'https://api.binance.com/api/v3/userDataStream'
       );
       
       return response.data.listenKey;

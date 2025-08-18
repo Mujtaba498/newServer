@@ -87,15 +87,25 @@ class RecoveryService {
       const recoveryActions = await this.analyzeRecoveryNeeds(bot, userBinance);
       
       if (recoveryActions.needsRecovery) {
-        console.log(`Bot ${bot._id} needs recovery: ${recoveryActions.missingSellOrders.length} missing sell orders`);
+        const missingSellCount = recoveryActions.missingSellOrders.length;
+        const missingBuyCount = recoveryActions.missingBuyOrders.length;
+        
+        console.log(`Bot ${bot._id} needs recovery: ${missingSellCount} missing sell orders, ${missingBuyCount} missing buy orders`);
         
         // Place missing sell orders
-        await this.placeMissingSellOrders(bot, userBinance, recoveryActions);
+        if (missingSellCount > 0) {
+          await this.placeMissingSellOrders(bot, userBinance, recoveryActions);
+        }
+        
+        // Place missing buy orders
+        if (missingBuyCount > 0) {
+          await this.placeMissingBuyOrders(bot, userBinance, recoveryActions);
+        }
         
         // Update bot statistics
         await this.updateBotStatistics(bot);
         
-        console.log(`Recovery completed for bot ${bot._id}`);
+        console.log(`Recovery completed for bot ${bot._id}: placed ${missingSellCount} sell orders and ${missingBuyCount} buy orders`);
       } else {
         console.log(`Bot ${bot._id} is in sync, no recovery needed`);
       }
@@ -117,7 +127,7 @@ class RecoveryService {
           gridBotService.monitorGridOrders(bot._id.toString()).catch(error => {
             console.error(`Monitoring error for recovered bot ${bot._id}:`, error.message);
           });
-        }, 1000); // Check every 1 second
+        }, 30000); // Check every 30 seconds to avoid rate limits
         
         gridBotService.intervals.set(bot._id.toString(), monitorInterval);
         
@@ -213,22 +223,52 @@ class RecoveryService {
       !order.isLiquidation
     );
 
-    console.log(`📊 Found ${filledBuyOrders.length} filled buy orders to analyze`);
+    // Find all FILLED sell orders that might need corresponding buy orders
+    const filledSellOrders = bot.orders.filter(order => 
+      order.side === 'SELL' && 
+      order.status === 'FILLED' && 
+      !order.isLiquidation
+    );
+
+    console.log(`📊 Found ${filledBuyOrders.length} filled buy orders and ${filledSellOrders.length} filled sell orders to analyze`);
 
     const missingSellOrders = [];
+    const missingBuyOrders = [];
 
+    // Check for missing sell orders (existing logic)
     for (const buyOrder of filledBuyOrders) {
       console.log(`🔍 Checking buy order ${buyOrder.orderId} at grid level ${buyOrder.gridLevel}`);
       
-      // **FIX: Actually look for sell orders in the database, don't trust the flag**
-      const correspondingSell = bot.orders.find(order => 
+      // **ENHANCED FIX: Check for existing sell orders with flexible quantity matching**
+      const correspondingSell = bot.orders.find(order => {
+        if (order.side !== 'SELL' || order.gridLevel !== buyOrder.gridLevel || order.isLiquidation) {
+          return false;
+        }
+        
+        // More flexible quantity matching that accounts for trading fees
+        const expectedSellQty = buyOrder.executedQty || buyOrder.quantity;
+        const actualSellQty = order.quantity;
+        const qtyDifference = Math.abs(actualSellQty - expectedSellQty);
+        
+        // Allow for larger tolerance to account for trading fees (up to 0.2% + minimum threshold)
+        const maxAllowedDifference = Math.max(0.001, expectedSellQty * 0.002);
+        
+        console.log(`   Comparing sell order ${order.orderId}: expected=${expectedSellQty}, actual=${actualSellQty}, diff=${qtyDifference}, maxAllowed=${maxAllowedDifference}`);
+        
+        return qtyDifference <= maxAllowedDifference;
+      });
+      
+      // **ADDITIONAL CHECK: Look for existing recovery orders for this grid level**
+      const hasRecoveryOrder = bot.orders.some(order => 
         order.side === 'SELL' &&
         order.gridLevel === buyOrder.gridLevel &&
-        Math.abs(order.quantity - buyOrder.executedQty) < 0.0001 && // Use executedQty for comparison
-        !order.isLiquidation
+        order.isRecoveryOrder === true &&
+        order.status !== 'CANCELED' &&
+        order.status !== 'REJECTED' &&
+        order.status !== 'EXPIRED'
       );
 
-      if (!correspondingSell) {
+      if (!correspondingSell && !hasRecoveryOrder) {
         console.log(`❌ No corresponding sell order found for buy order ${buyOrder.orderId} (grid level ${buyOrder.gridLevel})`);
         console.log(`   Buy order details: quantity=${buyOrder.quantity}, executedQty=${buyOrder.executedQty}, price=${buyOrder.price}`);
         
@@ -239,25 +279,74 @@ class RecoveryService {
         
         // Reset the flag to reflect reality
         buyOrder.hasCorrespondingSell = false;
-      } else {
+      } else if (correspondingSell) {
         console.log(`✅ Found corresponding sell order ${correspondingSell.orderId} for buy order ${buyOrder.orderId}`);
         console.log(`   Sell order details: quantity=${correspondingSell.quantity}, price=${correspondingSell.price}, status=${correspondingSell.status}`);
         
-        // Only mark as true if we actually found a sell order
+        // Mark as true since we found a sell order
+        buyOrder.hasCorrespondingSell = true;
+      } else if (hasRecoveryOrder) {
+        console.log(`✅ Found existing recovery order for buy order ${buyOrder.orderId} (grid level ${buyOrder.gridLevel})`);
+        
+        // Mark as true since we found a recovery order
         buyOrder.hasCorrespondingSell = true;
       }
     }
 
+    // **NEW: Check for missing buy orders for filled sell orders**
+    for (const sellOrder of filledSellOrders) {
+      console.log(`🔍 Checking sell order ${sellOrder.orderId} at grid level ${sellOrder.gridLevel}`);
+      
+      // Look for corresponding buy order at the same grid level
+      const correspondingBuy = bot.orders.find(order => {
+        if (order.side !== 'BUY' || order.gridLevel !== sellOrder.gridLevel || order.isLiquidation) {
+          return false;
+        }
+        
+        // For buy orders, we're less concerned about exact quantity matching
+        // since the buy order should be placed to continue the grid strategy
+        return true;
+      });
+      
+      // Check for existing recovery buy orders for this grid level
+      const hasRecoveryBuyOrder = bot.orders.some(order => 
+        order.side === 'BUY' &&
+        order.gridLevel === sellOrder.gridLevel &&
+        order.isRecoveryOrder === true &&
+        order.status !== 'CANCELED' &&
+        order.status !== 'REJECTED' &&
+        order.status !== 'EXPIRED'
+      );
+
+      if (!correspondingBuy && !hasRecoveryBuyOrder) {
+        console.log(`❌ No corresponding buy order found for sell order ${sellOrder.orderId} (grid level ${sellOrder.gridLevel})`);
+        console.log(`   Sell order details: quantity=${sellOrder.quantity}, executedQty=${sellOrder.executedQty}, price=${sellOrder.price}`);
+        
+        missingBuyOrders.push({
+          sellOrder,
+          expectedBuyPrice: this.calculateBuyPrice(bot, sellOrder)
+        });
+      } else if (correspondingBuy) {
+        console.log(`✅ Found corresponding buy order ${correspondingBuy.orderId} for sell order ${sellOrder.orderId}`);
+      } else if (hasRecoveryBuyOrder) {
+        console.log(`✅ Found existing recovery buy order for sell order ${sellOrder.orderId} (grid level ${sellOrder.gridLevel})`);
+      }
+    }
+
     const result = {
-      needsRecovery: missingSellOrders.length > 0,
+      needsRecovery: missingSellOrders.length > 0 || missingBuyOrders.length > 0,
       missingSellOrders,
-      filledBuyOrders: filledBuyOrders.length
+      missingBuyOrders,
+      filledBuyOrders: filledBuyOrders.length,
+      filledSellOrders: filledSellOrders.length
     };
 
     console.log(`📋 Recovery analysis result:`, {
       needsRecovery: result.needsRecovery,
       missingSellOrdersCount: missingSellOrders.length,
-      filledBuyOrdersCount: filledBuyOrders.length
+      missingBuyOrdersCount: missingBuyOrders.length,
+      filledBuyOrdersCount: filledBuyOrders.length,
+      filledSellOrdersCount: filledSellOrders.length
     });
 
     return result;
@@ -294,6 +383,173 @@ class RecoveryService {
     }
     
     return sellPrice;
+  }
+
+  /**
+   * Calculate expected buy price based on actual sell price - profit margin
+   */
+  calculateBuyPrice(bot, sellOrder) {
+    // Use actual executed price if available, otherwise use order price
+    const actualSellPrice = sellOrder.executedPrice || sellOrder.price;
+    const profitMargin = bot.config.profitPerGrid / 100;
+    
+    const buyPrice = actualSellPrice * (1 - profitMargin);
+    
+    console.log(`💰 Calculated buy price for sell order ${sellOrder.orderId}:`, {
+      actualSellPrice,
+      profitMargin: `${bot.config.profitPerGrid}%`,
+      buyPrice
+    });
+    
+    return buyPrice;
+  }
+
+  /**
+   * Place missing buy orders
+   */
+  async placeMissingBuyOrders(bot, userBinance, recoveryActions) {
+    console.log(`Placing ${recoveryActions.missingBuyOrders.length} missing buy orders`);
+
+    const placedOrders = [];
+
+    for (const { sellOrder, expectedBuyPrice } of recoveryActions.missingBuyOrders) {
+      try {
+        // Get symbol filters for proper rounding and validations
+        const symbolInfo = await userBinance.getSymbolInfo(bot.symbol);
+
+        // Calculate buy quantity based on grid configuration
+        const investmentPerGrid = bot.config.investmentAmount / bot.config.gridLevels;
+        const buyQty = investmentPerGrid / expectedBuyPrice;
+
+        // Round DOWN to step size (LOT_SIZE) and to quantity precision
+        let roundedQty = buyQty;
+        if (symbolInfo.stepSize > 0) {
+          roundedQty = Math.floor(roundedQty / symbolInfo.stepSize) * symbolInfo.stepSize;
+        }
+        if (symbolInfo.quantityPrecision >= 0) {
+          const p = Math.pow(10, symbolInfo.quantityPrecision);
+          roundedQty = Math.floor(roundedQty * p) / p;
+        }
+
+        // Round price to valid tick size and precision
+        let roundedPrice = expectedBuyPrice;
+        if (symbolInfo.tickSize > 0) {
+          roundedPrice = Math.round(roundedPrice / symbolInfo.tickSize) * symbolInfo.tickSize;
+        }
+        if (symbolInfo.pricePrecision >= 0) {
+          const pp = Math.pow(10, symbolInfo.pricePrecision);
+          roundedPrice = Math.round(roundedPrice * pp) / pp;
+        }
+
+        // Validate against minimum quantity and notional requirements
+        if (roundedQty < symbolInfo.minQty) {
+          console.warn(`Skipping recovery buy: quantity below minQty. Computed: ${roundedQty}, minQty: ${symbolInfo.minQty}`);
+          continue;
+        }
+
+        const notional = roundedQty * roundedPrice;
+        if (notional < symbolInfo.minNotional) {
+          console.warn(`Skipping recovery buy: notional below minNotional. Computed: ${notional}, minNotional: ${symbolInfo.minNotional}`);
+          continue;
+        }
+
+        if (roundedQty <= 0) {
+          console.warn(`Skipping recovery buy: non-positive quantity after rounding.`);
+          continue;
+        }
+
+        // Place the buy order
+        console.log(`🔄 Attempting to place recovery buy order:`, {
+          symbol: bot.symbol,
+          side: 'BUY',
+          quantity: roundedQty,
+          price: roundedPrice,
+          gridLevel: sellOrder.gridLevel,
+          userId: bot.userId
+        });
+        
+        const buyOrder = await userBinance.placeLimitOrder(
+          bot.symbol,
+          'BUY',
+          roundedQty,
+          roundedPrice
+        );
+
+        console.log(`📈 Binance API response for buy order:`, buyOrder);
+
+        if (buyOrder && buyOrder.orderId) {
+          const newBuyOrder = {
+            orderId: buyOrder.orderId.toString(),
+            clientOrderId: buyOrder.clientOrderId,
+            side: 'BUY',
+            type: 'LIMIT',
+            quantity: roundedQty,
+            price: roundedPrice,
+            gridLevel: sellOrder.gridLevel,
+            status: 'NEW',
+            timestamp: new Date(),
+            isRecoveryOrder: true
+          };
+
+          bot.orders.push(newBuyOrder);
+          placedOrders.push(newBuyOrder);
+
+          // Persist immediately
+          try {
+            await bot.save();
+            console.log(`💾 Bot updated in DB with recovery buy order ${newBuyOrder.orderId}`);
+          } catch (immediateSaveErr) {
+            console.warn(`⚠️ Immediate save after placing recovery buy order failed: ${immediateSaveErr.message}`);
+          }
+
+          console.log(`✅ Recovery buy order placed successfully:`, {
+            orderId: buyOrder.orderId,
+            clientOrderId: buyOrder.clientOrderId,
+            price: roundedPrice,
+            quantity: roundedQty,
+            gridLevel: sellOrder.gridLevel
+          });
+
+          // Verify order was actually placed on Binance
+          try {
+            console.log(`🔍 Verifying buy order placement on Binance...`);
+            await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second
+            
+            const verifyOrder = await userBinance.getOrderStatus(bot.symbol, buyOrder.orderId);
+            console.log(`🔍 Binance buy order verification:`, verifyOrder);
+            
+            if (!verifyOrder || verifyOrder.status === 'REJECTED' || verifyOrder.status === 'EXPIRED') {
+              console.error(`❌ Buy order verification failed - Order not found or rejected on Binance:`, verifyOrder);
+              // Remove the order from local database if it wasn't actually placed
+              const orderIndex = bot.orders.findIndex(o => o.orderId === buyOrder.orderId);
+              if (orderIndex !== -1) {
+                bot.orders.splice(orderIndex, 1);
+                const placedIndex = placedOrders.findIndex(o => o.orderId === buyOrder.orderId);
+                if (placedIndex !== -1) {
+                  placedOrders.splice(placedIndex, 1);
+                }
+              }
+            }
+          } catch (verifyError) {
+            console.warn(`⚠️ Could not verify buy order placement:`, verifyError.message);
+          }
+        } else {
+          console.error(`❌ Invalid response from Binance placeLimitOrder:`, buyOrder);
+          throw new Error(`Invalid response from Binance: ${JSON.stringify(buyOrder)}`);
+        }
+      } catch (error) {
+        console.error(`❌ Failed to place recovery buy order for sell order ${sellOrder.orderId}:`, error.message);
+      }
+    }
+
+    // Save updates
+    try {
+      await bot.save();
+    } catch (saveError) {
+      console.error(`❌ Failed to save bot after placing recovery buy orders:`, saveError.message);
+    }
+
+    return placedOrders;
   }
 
   /**
