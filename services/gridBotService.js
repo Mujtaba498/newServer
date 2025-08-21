@@ -558,8 +558,24 @@ class GridBotService {
           
           if (filledOrder.side === 'SELL') {
             // Calculate profit (only count when selling)
-            const profit = (filledOrder.price - oppositePrice) * filledOrder.quantity;
-            bot.statistics.totalProfit += profit;
+            // Find the corresponding buy order to calculate actual profit
+            const correspondingBuyOrder = bot.orders.find(o => 
+              o.side === 'BUY' && 
+              o.status === 'FILLED' && 
+              o.hasCorrespondingSell && 
+              Math.abs(o.price * (1 + profitMargin) - filledOrder.price) < filledOrder.price * 0.02
+            );
+            
+            if (correspondingBuyOrder) {
+              // Use actual executed prices for accurate profit calculation
+              const buyPrice = correspondingBuyOrder.executedPrice || correspondingBuyOrder.price;
+              const sellPrice = filledOrder.executedPrice || filledOrder.price;
+              const profit = (sellPrice - buyPrice) * filledOrder.quantity;
+              bot.statistics.totalProfit += profit;
+              console.log(`💰 Profit calculated: (${sellPrice} - ${buyPrice}) * ${filledOrder.quantity} = ${profit}`);
+            } else {
+              console.warn(`⚠️ Could not find corresponding buy order for sell order ${filledOrder.orderId}`);
+            }
           }
 
           console.log(`Placed opposite ${oppositeSide} order for bot ${bot._id} at price ${oppositePrice}`);

@@ -19,6 +19,12 @@ const {
   gridBotIdValidation
 } = require('../middleware/gridBotValidation');
 const { protect } = require('../middleware/auth');
+const { 
+  checkSubscription, 
+  enforceBotLimits, 
+  attachSubscriptionInfo,
+  validateSubscriptionAction 
+} = require('../middleware/subscriptionAuth');
 
 const router = express.Router();
 
@@ -60,6 +66,9 @@ const marketDataLimiter = rateLimit({
 
 // All routes require authentication
 router.use(protect);
+// Apply subscription checking to all routes
+router.use(checkSubscription);
+router.use(attachSubscriptionInfo);
 
 // Market data and account routes (must be before /:botId routes)
 router.get('/symbols', marketDataLimiter, getAllSymbols);
@@ -67,14 +76,14 @@ router.get('/market/:symbol', marketDataLimiter, getMarketData);
 router.get('/account/balance', marketDataLimiter, getAccountBalance);
 
 // Grid bot management routes
-router.post('/create', gridBotLimiter, createGridBotValidation, createGridBot);
-router.post('/', gridBotLimiter, createGridBotValidation, createGridBot); // Keep backward compatibility
+router.post('/create', gridBotLimiter, createGridBotValidation, enforceBotLimits, createGridBot);
+router.post('/', gridBotLimiter, createGridBotValidation, enforceBotLimits, createGridBot); // Keep backward compatibility
 router.get('/', gridBotLimiter, getUserGridBots);
 router.get('/:botId', gridBotLimiter, gridBotIdValidation, getGridBot);
 router.delete('/:botId', gridBotLimiter, gridBotIdValidation, deleteGridBot);
 
 // Grid bot control routes (trading operations)
-router.post('/:botId/start', tradingLimiter, gridBotIdValidation, startGridBot);
+router.post('/:botId/start', tradingLimiter, gridBotIdValidation, validateSubscriptionAction('start_bot'), startGridBot);
 router.post('/:botId/stop', tradingLimiter, gridBotIdValidation, stopGridBot);
 router.post('/:botId/pause', tradingLimiter, gridBotIdValidation, pauseGridBot);
 

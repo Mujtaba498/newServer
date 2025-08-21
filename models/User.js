@@ -162,7 +162,61 @@ userSchema.methods.clearBinanceCredentials = function() {
   this.binanceCredentials.apiKey = undefined;
   this.binanceCredentials.secretKey = undefined;
   this.binanceCredentials.isConfigured = false;
-  this.binanceCredentials.lastUpdated = new Date();
+  this.binanceCredentials.lastUpdated = undefined;
+};
+
+// Get user's subscription
+userSchema.methods.getSubscription = async function() {
+  const Subscription = require('./Subscription');
+  return await Subscription.findOne({ userId: this._id });
+};
+
+// Check if user has active premium subscription
+userSchema.methods.hasPremiumSubscription = async function() {
+  const subscription = await this.getSubscription();
+  return subscription && subscription.planType === 'premium' && subscription.isActive();
+};
+
+// Get user's plan limits
+userSchema.methods.getPlanLimits = async function() {
+  const subscription = await this.getSubscription();
+  if (subscription) {
+    return subscription.getPlanLimits();
+  }
+  // Default to free plan limits
+  const Subscription = require('./Subscription');
+  return Subscription.getPlanLimits('free');
+};
+
+// Check if user can create more bots
+userSchema.methods.canCreateBot = async function(investment) {
+  const GridBot = require('./GridBot');
+  const limits = await this.getPlanLimits();
+  
+  // Check investment limit
+  if (investment > limits.maxInvestmentPerBot) {
+    return {
+      canCreate: false,
+      reason: 'INVESTMENT_LIMIT_EXCEEDED',
+      message: `Investment amount exceeds your plan limit of $${limits.maxInvestmentPerBot}`
+    };
+  }
+  
+  // Check bot count limit
+  const botCount = await GridBot.countDocuments({ userId: this._id });
+  if (botCount >= limits.maxBots) {
+    return {
+      canCreate: false,
+      reason: 'BOT_LIMIT_EXCEEDED',
+      message: `You have reached the maximum number of bots (${limits.maxBots}) for your plan`
+    };
+  }
+  
+  return {
+    canCreate: true,
+    remainingBots: limits.maxBots - botCount,
+    limits
+  };
 };
 
 module.exports = mongoose.model('User', userSchema);
