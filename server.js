@@ -55,7 +55,7 @@ app.use(express.urlencoded({ extended: true }));
 app.get('/health', (req, res) => {
   res.status(200).json({
     success: true,
-    message: 'GetFork Backend is running successfully!, proxy fix applied',
+    message: 'GetFork Backend is running on staging branch!',
     timestamp: new Date().toISOString(),
     environment: process.env.NODE_ENV || 'development'
   });
