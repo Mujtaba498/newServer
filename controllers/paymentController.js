@@ -8,15 +8,37 @@ const handleCryptomusWebhook = async (req, res) => {
     const webhookData = req.body;
     const signature = req.headers['sign'] || req.headers['signature'];
     
-    console.log('Received Cryptomus webhook:', {
+    // Enhanced logging for debugging
+    console.log('=== CRYPTOMUS WEBHOOK RECEIVED ===');
+    console.log('Headers:', {
+      'content-type': req.headers['content-type'],
+      'sign': req.headers['sign'],
+      'signature': req.headers['signature'],
+      'user-agent': req.headers['user-agent']
+    });
+    console.log('Raw Body:', JSON.stringify(req.body, null, 2));
+    console.log('Webhook Data:', {
       orderId: webhookData.order_id,
       status: webhookData.payment_status,
-      amount: webhookData.amount
+      amount: webhookData.amount,
+      uuid: webhookData.uuid,
+      allFields: Object.keys(webhookData)
     });
+    console.log('Signature received:', signature);
     
     // Verify webhook signature
-    if (!cryptomusService.verifyWebhookSignature(webhookData, signature)) {
-      console.error('Invalid webhook signature');
+    const isValidSignature = cryptomusService.verifyWebhookSignature(webhookData, signature);
+    console.log('Signature verification result:', isValidSignature);
+    
+    if (!isValidSignature) {
+      console.error('=== SIGNATURE VERIFICATION FAILED ===');
+      console.error('Expected signature calculation:');
+      const jsonString = JSON.stringify(webhookData);
+      const encodedData = Buffer.from(jsonString).toString('base64');
+      console.error('JSON String:', jsonString);
+      console.error('Base64 Encoded:', encodedData);
+      console.error('Webhook Secret:', process.env.CRYPTOMUS_WEBHOOK_SECRET);
+      
       return res.status(400).json({
         success: false,
         message: 'Invalid signature'
@@ -33,15 +55,30 @@ const handleCryptomusWebhook = async (req, res) => {
     }
     
     // Find payment by order ID
+    console.log('Searching for payment with order ID:', webhookData.order_id);
     const payment = await Payment.findByOrderId(webhookData.order_id);
     
     if (!payment) {
-      console.error('Payment not found for order ID:', webhookData.order_id);
+      console.error('=== PAYMENT NOT FOUND ===');
+      console.error('Order ID searched:', webhookData.order_id);
+      
+      // Debug: List recent payments to help identify the issue
+      const recentPayments = await Payment.find({}).sort({ createdAt: -1 }).limit(5).select('cryptomusOrderId amount status createdAt');
+      console.error('Recent payments in database:', recentPayments);
+      
       return res.status(404).json({
         success: false,
         message: 'Payment not found'
       });
     }
+    
+    console.log('Payment found:', {
+      paymentId: payment._id,
+      userId: payment.userId,
+      currentStatus: payment.status,
+      amount: payment.amount,
+      createdAt: payment.createdAt
+    });
     
     // Get payment status from webhook
     const newStatus = cryptomusService.getPaymentStatusFromWebhook(webhookData);
@@ -76,8 +113,18 @@ const handleCryptomusWebhook = async (req, res) => {
       }
       
       // Upgrade user subscription
+      console.log('=== UPGRADING USER SUBSCRIPTION ===');
+      console.log('User ID:', payment.userId);
+      console.log('Payment details:', {
+        paymentId: payment._id,
+        amount: payment.amount,
+        planType: payment.planType,
+        planDuration: payment.planDuration
+      });
+      
       await upgradeUserSubscription(payment.userId, payment);
       
+      console.log('=== SUBSCRIPTION UPGRADE COMPLETED ===');
       console.log('Payment completed and subscription upgraded:', {
         userId: payment.userId,
         paymentId: payment._id,
@@ -104,10 +151,29 @@ const handleCryptomusWebhook = async (req, res) => {
     });
     
   } catch (error) {
-    console.error('Cryptomus webhook error:', error);
+    console.error('=== WEBHOOK PROCESSING ERROR ===');
+    console.error('Error details:', {
+      message: error.message,
+      stack: error.stack,
+      webhookData: req.body,
+      headers: {
+        'sign': req.headers['sign'],
+        'signature': req.headers['signature'],
+        'content-type': req.headers['content-type']
+      }
+    });
+    
+    // Log specific error types for better debugging
+    if (error.name === 'ValidationError') {
+      console.error('Validation Error Details:', error.errors);
+    } else if (error.name === 'CastError') {
+      console.error('Database Cast Error:', error.path, error.value);
+    }
+    
     res.status(500).json({
       success: false,
-      message: 'Webhook processing failed'
+      message: 'Webhook processing failed',
+      ...(process.env.NODE_ENV === 'development' && { error: error.message })
     });
   }
 };
@@ -175,35 +241,84 @@ const resendWebhook = async (req, res) => {
 // Helper function to upgrade user subscription
 const upgradeUserSubscription = async (userId, payment) => {
   try {
+    console.log('=== STARTING SUBSCRIPTION UPGRADE ===');
+    console.log('Looking for subscription for user:', userId);
+    
     const subscription = await Subscription.findOne({ userId });
     
     if (!subscription) {
-      console.error('Subscription not found for user:', userId);
-      return;
+      console.error('=== SUBSCRIPTION NOT FOUND ===');
+      console.error('User ID:', userId);
+      
+      // Debug: List recent subscriptions
+      const recentSubscriptions = await Subscription.find({}).sort({ createdAt: -1 }).limit(5).select('userId planType status createdAt');
+      console.error('Recent subscriptions:', recentSubscriptions);
+      
+      throw new Error('Subscription not found for user');
     }
     
-    // Calculate end date based on payment duration
+    console.log('Current subscription found:', {
+      subscriptionId: subscription._id,
+      currentPlanType: subscription.planType,
+      currentStatus: subscription.status,
+      currentEndDate: subscription.endDate
+    });
+    
+    // Calculate end date based on plan duration (in days)
+    const startDate = new Date();
     const endDate = new Date();
     endDate.setDate(endDate.getDate() + payment.planDuration);
+    
+    console.log('Updating subscription with:', {
+      newPlanType: payment.planType,
+      newStatus: 'active',
+      startDate,
+      endDate,
+      paymentId: payment._id
+    });
     
     // Update subscription
     subscription.planType = payment.planType;
     subscription.status = 'active';
-    subscription.startDate = new Date();
+    subscription.startDate = startDate;
     subscription.endDate = endDate;
-    subscription.paymentId = payment.cryptomusOrderId;
+    subscription.paymentId = payment._id;
     subscription.autoRenew = false;
     
-    await subscription.save();
+    const savedSubscription = await subscription.save();
     
+    console.log('=== SUBSCRIPTION UPGRADE SUCCESS ===');
     console.log('Subscription upgraded successfully:', {
       userId,
+      subscriptionId: savedSubscription._id,
       planType: subscription.planType,
-      endDate: subscription.endDate
+      status: savedSubscription.status,
+      endDate: savedSubscription.endDate
     });
     
   } catch (error) {
-    console.error('Upgrade user subscription error:', error);
+    console.error('=== SUBSCRIPTION UPGRADE ERROR ===');
+    console.error('Error details:', {
+      message: error.message,
+      stack: error.stack,
+      userId,
+      paymentDetails: {
+        paymentId: payment._id,
+        amount: payment.amount,
+        planType: payment.planType,
+        planDuration: payment.planDuration
+      }
+    });
+    
+    // Log specific error types
+    if (error.name === 'ValidationError') {
+      console.error('Subscription Validation Error:', error.errors);
+    } else if (error.name === 'CastError') {
+      console.error('Subscription Cast Error:', error.path, error.value);
+    } else if (error.message.includes('not found')) {
+      console.error('Subscription not found for user:', userId);
+    }
+    
     throw error;
   }
 };
