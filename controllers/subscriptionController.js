@@ -66,7 +66,7 @@ const getSubscriptionPlans = async (req, res) => {
       },
       premium: {
         name: 'Premium Plan',
-        price: 3,
+        price: 1,
         currency: 'USD',
         duration: '30 days',
         features: {

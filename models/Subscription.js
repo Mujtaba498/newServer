@@ -55,7 +55,7 @@ subscriptionSchema.statics.getPlanLimits = function(planType) {
     premium: {
       maxBots: 3,
       maxInvestmentPerBot: 1000,
-      price: 3
+      price: 1
     }
   };
   
