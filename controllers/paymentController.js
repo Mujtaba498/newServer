@@ -6,38 +6,48 @@ const cryptomusService = require('../services/cryptomusService');
 const handleCryptomusWebhook = async (req, res) => {
   try {
     const webhookData = req.body;
-    const signature = req.headers['sign'] || req.headers['signature'];
+    // Extract signature from request body (not headers)
+    const signature = webhookData.sign;
     
     // Enhanced logging for debugging
     console.log('=== CRYPTOMUS WEBHOOK RECEIVED ===');
     console.log('Headers:', {
       'content-type': req.headers['content-type'],
-      'sign': req.headers['sign'],
-      'signature': req.headers['signature'],
       'user-agent': req.headers['user-agent']
     });
     console.log('Raw Body:', JSON.stringify(req.body, null, 2));
     console.log('Webhook Data:', {
       orderId: webhookData.order_id,
-      status: webhookData.payment_status,
+      status: webhookData.payment_status || webhookData.status,
       amount: webhookData.amount,
       uuid: webhookData.uuid,
       allFields: Object.keys(webhookData)
     });
     console.log('Signature received:', signature);
     
+    // Create a copy of webhook data without the signature for verification
+    const dataForVerification = { ...webhookData };
+    delete dataForVerification.sign;
+    
     // Verify webhook signature
-    const isValidSignature = cryptomusService.verifyWebhookSignature(webhookData, signature);
+    const isValidSignature = cryptomusService.verifyWebhookSignature(dataForVerification, signature);
     console.log('Signature verification result:', isValidSignature);
     
     if (!isValidSignature) {
       console.error('=== SIGNATURE VERIFICATION FAILED ===');
-      console.error('Expected signature calculation:');
-      const jsonString = JSON.stringify(webhookData);
+      console.error('Data used for verification (without sign):');
+      const jsonString = JSON.stringify(dataForVerification);
       const encodedData = Buffer.from(jsonString).toString('base64');
       console.error('JSON String:', jsonString);
       console.error('Base64 Encoded:', encodedData);
       console.error('Webhook Secret:', process.env.CRYPTOMUS_WEBHOOK_SECRET);
+      console.error('Received signature:', signature);
+      console.error('Expected signature:', require('crypto').createHash('md5').update(encodedData + process.env.CRYPTOMUS_WEBHOOK_SECRET).digest('hex'));
+      
+      // Also log the original webhook data for comparison
+      console.error('Original webhook data (with sign):');
+      console.error('Original JSON:', JSON.stringify(webhookData));
+      console.error('Original Base64:', Buffer.from(JSON.stringify(webhookData)).toString('base64'));
       
       return res.status(400).json({
         success: false,
@@ -45,9 +55,19 @@ const handleCryptomusWebhook = async (req, res) => {
       });
     }
     
-    // Validate webhook data
-    if (!cryptomusService.validateWebhookData(webhookData)) {
-      console.error('Invalid webhook data:', webhookData);
+    // Validate webhook data (handle both payment_status and status fields)
+    const hasRequiredFields = webhookData.uuid && webhookData.order_id && webhookData.amount && 
+                             (webhookData.payment_status || webhookData.status);
+    
+    if (!hasRequiredFields) {
+      console.error('Invalid webhook data - missing required fields:', {
+        uuid: !!webhookData.uuid,
+        order_id: !!webhookData.order_id,
+        amount: !!webhookData.amount,
+        payment_status: !!webhookData.payment_status,
+        status: !!webhookData.status,
+        allFields: Object.keys(webhookData)
+      });
       return res.status(400).json({
         success: false,
         message: 'Invalid webhook data'
@@ -82,12 +102,15 @@ const handleCryptomusWebhook = async (req, res) => {
     
     // Get payment status from webhook
     const newStatus = cryptomusService.getPaymentStatusFromWebhook(webhookData);
+    const webhookStatus = webhookData.payment_status || webhookData.status;
     
     console.log('Processing payment status change:', {
       paymentId: payment._id,
       oldStatus: payment.status,
       newStatus,
-      webhookStatus: webhookData.payment_status
+      webhookStatus,
+      rawWebhookStatus: webhookData.payment_status,
+      rawStatus: webhookData.status
     });
     
     // Update payment status

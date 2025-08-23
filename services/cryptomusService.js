@@ -237,7 +237,9 @@ class CryptomusService {
       'check': 'processing'
     };
 
-    return statusMap[webhookData.payment_status] || 'pending';
+    // Handle both payment_status and status fields
+    const status = webhookData.payment_status || webhookData.status;
+    return statusMap[status] || 'pending';
   }
 }
 
