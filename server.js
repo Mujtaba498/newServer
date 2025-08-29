@@ -11,6 +11,8 @@ const recoveryService = require('./services/recoveryService');
 const authRoutes = require('./routes/auth');
 const gridBotRoutes = require('./routes/gridBot');
 const adminRoutes = require('./routes/admin');
+const subscriptionRoutes = require('./routes/subscription');
+const paymentRoutes = require('./routes/payment');
 
 validateEnvVars();
 
@@ -53,7 +55,7 @@ app.use(express.urlencoded({ extended: true }));
 app.get('/health', (req, res) => {
   res.status(200).json({
     success: true,
-    message: 'GetFork Backend is running successfully!, proxy fix applied',
+    message: 'GetFork Backend is running on staging branch!',
     timestamp: new Date().toISOString(),
     environment: process.env.NODE_ENV || 'development'
   });
@@ -62,6 +64,8 @@ app.get('/health', (req, res) => {
 app.use('/api/auth', authRoutes);
 app.use('/api/grid-bots', gridBotRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/subscriptions', subscriptionRoutes);
+app.use('/api/payments', paymentRoutes);
 
 app.use('*', (req, res) => {
   res.status(404).json({
