@@ -68,6 +68,13 @@ curl -X GET "http://localhost:5000/api/admin/users?page=1&limit=10&search=john&r
           "totalBots": 5,
           "activeBots": 3,
           "inactiveBots": 2
+        },
+        "subscriptionStatus": {
+          "planType": "premium",
+          "status": "active",
+          "isActive": true,
+          "endDate": "2024-02-01T00:00:00.000Z",
+          "startDate": "2024-01-01T00:00:00.000Z"
         }
       }
     ],
@@ -242,6 +249,113 @@ curl -X GET "http://localhost:5000/api/admin/stats" \
   }
 }
 ```
+
+### 5. Upgrade User to Premium
+
+**Endpoint:** `POST /api/admin/users/:userId/upgrade-premium`
+
+**Description:** Manually upgrade any user to premium status without requiring payment through Cryptomus. This endpoint allows administrators to grant premium access directly.
+
+**Path Parameters:**
+- `userId` (required): The ID of the user to upgrade
+
+**Request Body:**
+- `duration` (optional): Number of days for the premium subscription (default: 30)
+
+**cURL Example:**
+```bash
+# Upgrade user to premium for default 30 days
+curl -X POST "http://localhost:5000/api/admin/users/USER_ID_HERE/upgrade-premium" \
+  -H "Authorization: Bearer YOUR_ADMIN_JWT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+
+# Upgrade user to premium for 60 days
+curl -X POST "http://localhost:5000/api/admin/users/USER_ID_HERE/upgrade-premium" \
+  -H "Authorization: Bearer YOUR_ADMIN_JWT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"duration": 60}'
+```
+
+**Success Response (New Subscription):**
+```json
+{
+  "success": true,
+  "message": "User upgraded to premium for 30 days",
+  "data": {
+    "subscription": {
+      "_id": "subscription_id",
+      "userId": "user_id",
+      "planType": "premium",
+      "status": "active",
+      "startDate": "2024-01-01T00:00:00.000Z",
+      "endDate": "2024-01-31T00:00:00.000Z",
+      "paymentId": "admin_upgrade_1704067200000_user_id",
+      "autoRenew": false,
+      "createdAt": "2024-01-01T00:00:00.000Z",
+      "updatedAt": "2024-01-01T00:00:00.000Z"
+    },
+    "user": {
+      "id": "user_id",
+      "name": "John Doe",
+      "email": "john@example.com"
+    }
+  }
+}
+```
+
+**Success Response (Extended Subscription):**
+```json
+{
+  "success": true,
+  "message": "Premium subscription extended by 30 days",
+  "data": {
+    "subscription": {
+      "_id": "subscription_id",
+      "userId": "user_id",
+      "planType": "premium",
+      "status": "active",
+      "startDate": "2024-01-01T00:00:00.000Z",
+      "endDate": "2024-02-30T00:00:00.000Z",
+      "paymentId": "existing_payment_id",
+      "autoRenew": false,
+      "createdAt": "2024-01-01T00:00:00.000Z",
+      "updatedAt": "2024-01-01T00:00:00.000Z"
+    },
+    "newEndDate": "2024-02-30T00:00:00.000Z"
+  }
+}
+```
+
+**Error Responses:**
+
+**400 Bad Request (Invalid User ID):**
+```json
+{
+  "success": false,
+  "message": "Invalid user ID"
+}
+```
+
+**404 Not Found (User Not Found):**
+```json
+{
+  "success": false,
+  "message": "User not found"
+}
+```
+
+**Features:**
+- **Automatic Detection**: If user already has an active premium subscription, it extends the existing subscription instead of creating a new one
+- **Flexible Duration**: Admins can specify custom duration in days (default: 30 days)
+- **Unique Payment ID**: Generates unique payment IDs for admin upgrades for tracking purposes
+- **No Payment Required**: Bypasses the Cryptomus payment process entirely
+- **Immediate Activation**: Premium features are available immediately after upgrade
+
+**Premium Plan Benefits:**
+- Maximum of 3 bots (vs 1 for free users)
+- Total investment limit of $1000 across all bots (vs $100 per bot for free users)
+- Access to advanced bot features and analytics
 
 ## Admin Access to Regular Features
 

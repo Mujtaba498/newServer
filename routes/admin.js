@@ -4,7 +4,8 @@ const {
   getAllUsers,
   getUserDetails,
   getAllBots,
-  getPlatformStats
+  getPlatformStats,
+  upgradeUserToPremium
 } = require('../controllers/adminController');
 const { protect } = require('../middleware/auth');
 const { adminOnly } = require('../middleware/adminAuth');
@@ -30,6 +31,7 @@ router.use(adminOnly);
 // Admin routes
 router.get('/users', adminLimiter, getAllUsers);
 router.get('/users/:userId', adminLimiter, getUserDetails);
+router.post('/users/:userId/upgrade-premium', adminLimiter, upgradeUserToPremium);
 router.get('/bots', adminLimiter, getAllBots);
 router.get('/stats', adminLimiter, getPlatformStats);
 

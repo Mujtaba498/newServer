@@ -54,7 +54,8 @@ subscriptionSchema.statics.getPlanLimits = function(planType) {
     },
     premium: {
       maxBots: 3,
-      maxInvestmentPerBot: 1000,
+      maxInvestmentPerBot: 1000, // Keep for backward compatibility
+      maxTotalInvestment: 1000, // New total investment limit
       price: 1
     }
   };

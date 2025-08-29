@@ -63,7 +63,7 @@ const checkSubscription = async (req, res, next) => {
 const enforceBotLimits = async (req, res, next) => {
   try {
     const userId = req.user.id;
-    const { investment } = req.body;
+    const { investmentAmount } = req.body;
     const planLimits = req.planLimits;
     
     // Skip limits for admin users
@@ -71,8 +71,8 @@ const enforceBotLimits = async (req, res, next) => {
       return next();
     }
     
-    // Check investment limit
-    if (investment > planLimits.maxInvestmentPerBot) {
+    // Check per-bot investment limit
+    if (investmentAmount > planLimits.maxInvestmentPerBot) {
       return res.status(403).json({
         success: false,
         message: `Investment amount exceeds your plan limit of $${planLimits.maxInvestmentPerBot}. ${req.subscription.planType === 'free' ? 'Upgrade to Premium for higher limits.' : ''}`,
@@ -94,6 +94,26 @@ const enforceBotLimits = async (req, res, next) => {
         currentBotCount: userBotCount,
         limits: planLimits
       });
+    }
+    
+    // Check total investment limit for premium users
+    if (req.subscription.planType === 'premium' && planLimits.maxTotalInvestment) {
+      const userBots = await GridBot.find({ userId }, 'config.investmentAmount');
+      const currentTotalInvestment = userBots.reduce((total, bot) => total + (bot.config?.investmentAmount || 0), 0);
+      const newTotalInvestment = currentTotalInvestment + investmentAmount;
+      
+      if (newTotalInvestment > planLimits.maxTotalInvestment) {
+        return res.status(403).json({
+          success: false,
+          message: `Total investment across all bots would exceed your Premium plan limit of $${planLimits.maxTotalInvestment}. Current total: $${currentTotalInvestment}, attempting to add: $${investmentAmount}. Please reduce investment amounts or delete some bots.`,
+          error: 'TOTAL_INVESTMENT_LIMIT_EXCEEDED',
+          currentPlan: req.subscription.planType,
+          currentTotalInvestment,
+          attemptedInvestment: investmentAmount,
+          newTotalInvestment,
+          limits: planLimits
+        });
+      }
     }
     
     next();

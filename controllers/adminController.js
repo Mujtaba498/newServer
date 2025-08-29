@@ -31,11 +31,31 @@ const getAllUsers = async (req, res) => {
 
     const totalUsers = await User.countDocuments(query);
 
-    // Get bot counts for each user
+    // Get bot counts and subscription status for each user
     const usersWithBotCounts = await Promise.all(
       users.map(async (user) => {
         const botCount = await GridBot.countDocuments({ userId: user._id });
         const activeBots = await GridBot.countDocuments({ userId: user._id, status: 'active' });
+        
+        // Get subscription status
+        const subscription = await Subscription.findOne({ userId: user._id });
+        let subscriptionStatus = {
+          planType: 'free',
+          status: 'active',
+          isActive: false,
+          endDate: null
+        };
+        
+        if (subscription) {
+          const isActive = subscription.status === 'active' && new Date() < new Date(subscription.endDate);
+          subscriptionStatus = {
+            planType: subscription.planType,
+            status: subscription.status,
+            isActive: isActive,
+            endDate: subscription.endDate,
+            startDate: subscription.startDate
+          };
+        }
         
         return {
           ...user.toObject(),
@@ -43,7 +63,8 @@ const getAllUsers = async (req, res) => {
             totalBots: botCount,
             activeBots: activeBots,
             inactiveBots: botCount - activeBots
-          }
+          },
+          subscriptionStatus: subscriptionStatus
         };
       })
     );
@@ -398,9 +419,107 @@ const getPlatformStats = async (req, res) => {
   }
 };
 
+// Upgrade user to premium manually (admin only)
+const upgradeUserToPremium = async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { duration = 30 } = req.body; // Default 30 days
+
+    // Validate userId
+    if (!mongoose.Types.ObjectId.isValid(userId)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid user ID'
+      });
+    }
+
+    // Check if user exists
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    // Check if user already has any subscription (active or expired)
+    const existingSubscription = await Subscription.findOne({ userId: userId });
+
+    if (existingSubscription) {
+      // Update existing subscription
+      const startDate = new Date();
+      const endDate = new Date(startDate.getTime() + (duration * 24 * 60 * 60 * 1000));
+      
+      // If subscription is still active and not expired, extend from current end date
+      if (existingSubscription.status === 'active' && new Date(existingSubscription.endDate) > new Date()) {
+        const currentEndDate = new Date(existingSubscription.endDate);
+        existingSubscription.endDate = new Date(currentEndDate.getTime() + (duration * 24 * 60 * 60 * 1000));
+      } else {
+        // If subscription is expired or inactive, start fresh
+        existingSubscription.startDate = startDate;
+        existingSubscription.endDate = endDate;
+        existingSubscription.status = 'active';
+        existingSubscription.planType = 'premium';
+        // Ensure paymentId is set for premium subscriptions
+        if (!existingSubscription.paymentId) {
+          existingSubscription.paymentId = `admin_upgrade_${Date.now()}_${userId}`;
+        }
+      }
+      
+      await existingSubscription.save();
+
+      return res.status(200).json({
+        success: true,
+        message: existingSubscription.status === 'active' && new Date(existingSubscription.endDate) > new Date() 
+          ? `Premium subscription extended by ${duration} days`
+          : `Premium subscription activated for ${duration} days`,
+        data: {
+          subscription: existingSubscription
+        }
+      });
+    } else {
+      // Create new premium subscription
+      const startDate = new Date();
+      const endDate = new Date(startDate.getTime() + (duration * 24 * 60 * 60 * 1000));
+
+      const newSubscription = new Subscription({
+        userId: userId,
+        planType: 'premium',
+        status: 'active',
+        startDate: startDate,
+        endDate: endDate,
+        paymentId: `admin_upgrade_${Date.now()}_${userId}` // Unique ID for admin upgrades
+      });
+
+      await newSubscription.save();
+
+      return res.status(201).json({
+        success: true,
+        message: `User upgraded to premium for ${duration} days`,
+        data: {
+          subscription: newSubscription,
+          user: {
+            id: user._id,
+            name: user.name,
+            email: user.email
+          }
+        }
+      });
+    }
+  } catch (error) {
+    console.error('Error upgrading user to premium:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+      error: error.message
+    });
+  }
+};
+
 module.exports = {
   getAllUsers,
   getUserDetails,
   getAllBots,
-  getPlatformStats
+  getPlatformStats,
+  upgradeUserToPremium
 };
