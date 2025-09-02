@@ -2,7 +2,10 @@ const User = require('../models/User');
 const GridBot = require('../models/GridBot');
 const Subscription = require('../models/Subscription');
 const mongoose = require('mongoose');
-const gridBotService = require('../services/gridBotService');
+const GridBotService = require('../services/gridBotService');
+
+// Create service instance
+const gridBotService = new GridBotService();
 
 // Get all users with their basic information
 const getAllUsers = async (req, res) => {
