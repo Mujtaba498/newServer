@@ -36,7 +36,7 @@ const getAllUsers = async (req, res) => {
       users.map(async (user) => {
         const botCount = await GridBot.countDocuments({ userId: user._id });
         const activeBots = await GridBot.countDocuments({ userId: user._id, status: 'active' });
-        
+
         // Get subscription status
         const subscription = await Subscription.findOne({ userId: user._id });
         let subscriptionStatus = {
@@ -45,7 +45,7 @@ const getAllUsers = async (req, res) => {
           isActive: false,
           endDate: null
         };
-        
+
         if (subscription) {
           const isActive = subscription.status === 'active' && new Date() < new Date(subscription.endDate);
           subscriptionStatus = {
@@ -56,7 +56,7 @@ const getAllUsers = async (req, res) => {
             startDate: subscription.startDate
           };
         }
-        
+
         return {
           ...user.toObject(),
           botStats: {
@@ -125,7 +125,7 @@ const getUserDetails = async (req, res) => {
     for (const bot of bots) {
       try {
         const detailedAnalysis = await gridBotService.getDetailedBotAnalysis(bot._id);
-        
+
         // Extract paired order profit information
         const pairedOrderProfits = detailedAnalysis.tradeHistory.completedTrades.map(trade => ({
           tradeId: trade.tradeId,
@@ -140,7 +140,7 @@ const getUserDetails = async (req, res) => {
           buyTimestamp: trade.buyOrder.timestamp,
           sellTimestamp: trade.sellOrder.timestamp
         }));
-        
+
         detailedBots.push({
           basicInfo: bot,
           detailedAnalysis,
@@ -167,13 +167,13 @@ const getUserDetails = async (req, res) => {
     const totalProfit = bots.reduce((sum, bot) => sum + (bot.statistics.totalProfit || 0), 0);
     const activeBots = bots.filter(bot => bot.status === 'active').length;
     const completedTrades = bots.reduce((sum, bot) => sum + (bot.statistics.totalTrades || 0), 0);
-    
+
     // Calculate additional statistics from detailed analysis
     let totalRealizedPnL = 0;
     let totalUnrealizedPnL = 0;
     let totalCompletedTrades = 0;
     let totalOpenOrders = 0;
-    
+
     detailedBots.forEach(botData => {
       if (botData.detailedAnalysis) {
         totalRealizedPnL += botData.detailedAnalysis.profitLossAnalysis.realizedPnL || 0;
@@ -258,12 +258,12 @@ const getAllBots = async (req, res) => {
     const activeBotsList = allBots.filter(bot => bot.status === 'active');
     const stoppedBotsList = allBots.filter(bot => bot.status === 'stopped');
     const pausedBotsList = allBots.filter(bot => bot.status === 'paused');
-    
+
     const totalInvestment = allBots.reduce((sum, bot) => sum + (bot.config.investmentAmount || 0), 0);
     const activeBotsInvestment = activeBotsList.reduce((sum, bot) => sum + (bot.config.investmentAmount || 0), 0);
     const stoppedBotsInvestment = stoppedBotsList.reduce((sum, bot) => sum + (bot.config.investmentAmount || 0), 0);
     const pausedBotsInvestment = pausedBotsList.reduce((sum, bot) => sum + (bot.config.investmentAmount || 0), 0);
-    
+
     const totalProfit = allBots.reduce((sum, bot) => sum + (bot.statistics.totalProfit || 0), 0);
     const activeBots = activeBotsList.length;
 
@@ -318,7 +318,7 @@ const getPlatformStats = async (req, res) => {
     const freeSubscriptions = await Subscription.countDocuments({ planType: 'free', status: 'active' });
     const expiredSubscriptions = await Subscription.countDocuments({ status: 'expired' });
     const cancelledSubscriptions = await Subscription.countDocuments({ status: 'cancelled' });
-    
+
     // Calculate users without subscriptions
     const usersWithoutSubscription = totalUsers - totalSubscriptions;
 
@@ -333,49 +333,84 @@ const getPlatformStats = async (req, res) => {
     const activeBotsList = allBots.filter(bot => bot.status === 'active');
     const stoppedBotsList = allBots.filter(bot => bot.status === 'stopped');
     const pausedBotsList = allBots.filter(bot => bot.status === 'paused');
-    
-    const totalInvestment = allBots.reduce((sum, bot) => sum + (bot.config.investmentAmount || 0), 0);
+
+    // FIX 1: totalInvestment should only count active bots
+    const totalInvestment = activeBotsList.reduce((sum, bot) => sum + (bot.config.investmentAmount || 0), 0);
     const stoppedBotsInvestment = stoppedBotsList.reduce((sum, bot) => sum + (bot.config.investmentAmount || 0), 0);
     const pausedBotsInvestment = pausedBotsList.reduce((sum, bot) => sum + (bot.config.investmentAmount || 0), 0);
-    
-    // Calculate accurate profit using detailed analysis method
+
+    // FIX 2: activeBotsInvestment should count only executed buy orders value
+    let activeBotsInvestment = 0;
+
+    // Calculate accurate profit using detailed analysis method for ALL bots (active + stopped)
     let totalRealizedProfit = 0;
     let totalUnrealizedProfit = 0;
     let totalTrades = 0;
-    let activeBotsInvestment = 0; // Will be calculated based on executed buy orders
-    
+
+    console.log(`📊 Admin Stats Calculation - Processing ${allBots.length} bots (${activeBotsList.length} active, ${stoppedBotsList.length} stopped, ${pausedBotsList.length} paused)`);
+
     for (const bot of allBots) {
       try {
         const analysis = await gridBotService.getDetailedBotAnalysis(bot._id);
-        
-        // Always include realized profit from all bots (active, stopped, paused)
-        totalRealizedProfit += analysis.profitLossAnalysis.realizedPnL || 0;
-        totalTrades += analysis.tradingActivity.totalTrades || 0;
-        
-        // Only include unrealized profit from active bots
+
+        // FIX 4: Include profit from both active and stopped bots
+        const botRealizedProfit = analysis.profitLossAnalysis.realizedPnL || 0;
+        totalRealizedProfit += botRealizedProfit;
+
+        console.log(`Bot ${bot._id} (${bot.status}): Realized PnL = ${botRealizedProfit}`);
+
+        // FIX 3: Only count unrealized profit from active bots (stopped bots have no unrealized positions)
         if (bot.status === 'active') {
-          totalUnrealizedProfit += analysis.profitLossAnalysis.unrealizedPnL || 0;
-          
-          // Calculate actual investment for active bots based on executed buy orders
-          const filledBuyOrders = bot.orders.filter(o => o.side === 'BUY' && o.status === 'FILLED');
-          const executedBuyInvestment = filledBuyOrders.reduce((sum, order) => {
-            return sum + (order.quantity * order.price);
-          }, 0);
-          activeBotsInvestment += executedBuyInvestment;
+          const botUnrealizedProfit = analysis.profitLossAnalysis.unrealizedPnL || 0;
+          totalUnrealizedProfit += botUnrealizedProfit;
+
+          console.log(`Bot ${bot._id} (active): Unrealized PnL = ${botUnrealizedProfit}`);
+
+          // FIX 2: Calculate actual investment from executed buy orders for active bots
+          if (analysis.currentPositions && analysis.currentPositions.holdings) {
+            let botActiveInvestment = 0;
+            for (const holding of analysis.currentPositions.holdings) {
+              const holdingValue = holding.quantity * holding.avgPrice;
+              botActiveInvestment += holdingValue;
+              activeBotsInvestment += holdingValue;
+            }
+            console.log(`Bot ${bot._id} active investment (holdings): ${botActiveInvestment}`);
+          }
         }
+
+        totalTrades += analysis.tradingActivity.totalTrades || 0;
       } catch (error) {
         console.error(`Failed to get detailed analysis for bot ${bot._id}:`, error.message);
         // Fallback to bot statistics if detailed analysis fails
-        totalRealizedProfit += (bot.statistics.totalProfit || 0);
+        const fallbackProfit = bot.statistics.totalProfit || 0;
+        totalRealizedProfit += fallbackProfit;
         totalTrades += (bot.statistics.totalTrades || 0);
-        
-        // For active bots, use config investment as fallback
+
+        console.log(`Bot ${bot._id} (fallback): Using statistics profit = ${fallbackProfit}`);
+
+        // For active bots, fallback to calculating executed buy orders manually
         if (bot.status === 'active') {
-          activeBotsInvestment += (bot.config.investmentAmount || 0);
+          const executedBuyOrders = bot.orders.filter(order =>
+            order.side === 'BUY' &&
+            order.status === 'FILLED' &&
+            !order.isLiquidation
+          );
+
+          let botActiveInvestment = 0;
+          for (const order of executedBuyOrders) {
+            const executedPrice = order.executedPrice || order.price;
+            const executedQty = order.executedQty || order.quantity;
+            const orderValue = executedPrice * executedQty;
+            botActiveInvestment += orderValue;
+            activeBotsInvestment += orderValue;
+          }
+          console.log(`Bot ${bot._id} active investment (fallback): ${botActiveInvestment}`);
         }
       }
     }
-    
+
+    console.log(`📊 Final calculations: Total Investment (active only) = ${totalInvestment}, Active Bots Investment (executed) = ${activeBotsInvestment}, Total Realized Profit = ${totalRealizedProfit}, Total Unrealized Profit = ${totalUnrealizedProfit}`);
+
     const totalProfit = totalRealizedProfit + totalUnrealizedProfit;
 
     // Get recent activity (last 7 days)
@@ -413,17 +448,17 @@ const getPlatformStats = async (req, res) => {
           recentlyCreated: recentBots
         },
         financial: {
-          totalInvestment,
-          activeBotsInvestment,
+          totalInvestment, // Now only active bots investment
+          activeBotsInvestment, // Now only executed buy orders value
           stoppedBotsInvestment,
           pausedBotsInvestment,
-          totalProfit,
-          totalRealizedProfit,
-          totalUnrealizedProfit,
+          totalProfit, // Now includes profit from both active and stopped bots
+          totalRealizedProfit, // Profit from completed trades (all bots)
+          totalUnrealizedProfit, // Unrealized profit from active bots only
           totalTrades,
           profitPercentage: totalInvestment > 0 ? ((totalProfit / totalInvestment) * 100).toFixed(2) : 0,
           realizedProfitPercentage: totalInvestment > 0 ? ((totalRealizedProfit / totalInvestment) * 100).toFixed(2) : 0,
-          averageInvestmentPerBot: totalBots > 0 ? (totalInvestment / totalBots).toFixed(2) : 0,
+          averageInvestmentPerBot: activeBots > 0 ? (totalInvestment / activeBots).toFixed(2) : 0,
           averageProfitPerBot: totalBots > 0 ? (totalProfit / totalBots).toFixed(2) : 0
         }
       }
@@ -467,7 +502,7 @@ const upgradeUserToPremium = async (req, res) => {
       // Update existing subscription
       const startDate = new Date();
       const endDate = new Date(startDate.getTime() + (duration * 24 * 60 * 60 * 1000));
-      
+
       // If subscription is still active and not expired, extend from current end date
       if (existingSubscription.status === 'active' && new Date(existingSubscription.endDate) > new Date()) {
         const currentEndDate = new Date(existingSubscription.endDate);
@@ -483,12 +518,12 @@ const upgradeUserToPremium = async (req, res) => {
           existingSubscription.paymentId = `admin_upgrade_${Date.now()}_${userId}`;
         }
       }
-      
+
       await existingSubscription.save();
 
       return res.status(200).json({
         success: true,
-        message: existingSubscription.status === 'active' && new Date(existingSubscription.endDate) > new Date() 
+        message: existingSubscription.status === 'active' && new Date(existingSubscription.endDate) > new Date()
           ? `Premium subscription extended by ${duration} days`
           : `Premium subscription activated for ${duration} days`,
         data: {

@@ -1022,27 +1022,35 @@ class GridBotService {
       
       for (const pair of tradePairs) {
         if (pair.buyOrder && pair.sellOrder) {
-          const profit = (pair.sellOrder.price - pair.buyOrder.price) * pair.buyOrder.quantity;
+          // Use executed prices for accurate profit calculation
+          const buyPrice = pair.buyOrder.executedPrice || pair.buyOrder.price;
+          const sellPrice = pair.sellOrder.executedPrice || pair.sellOrder.price;
+          const buyQty = pair.buyOrder.executedQty || pair.buyOrder.quantity;
+          const sellQty = pair.sellOrder.executedQty || pair.sellOrder.quantity;
+          
+          // Use the smaller quantity to calculate profit (in case of partial fills)
+          const tradeQty = Math.min(buyQty, sellQty);
+          const profit = (sellPrice - buyPrice) * tradeQty;
           realizedPnL += profit;
           
           completedTrades.push({
             tradeId: `${pair.buyOrder.orderId}-${pair.sellOrder.orderId}`,
             buyOrder: {
               orderId: pair.buyOrder.orderId,
-              price: pair.buyOrder.price,
-              quantity: pair.buyOrder.quantity,
+              price: buyPrice,
+              quantity: tradeQty,
               timestamp: pair.buyOrder.timestamp || 'N/A',
               gridLevel: pair.buyOrder.gridLevel
             },
             sellOrder: {
               orderId: pair.sellOrder.orderId,
-              price: pair.sellOrder.price,
-              quantity: pair.sellOrder.quantity,
+              price: sellPrice,
+              quantity: tradeQty,
               timestamp: pair.sellOrder.timestamp || 'N/A',
               gridLevel: pair.sellOrder.gridLevel
             },
             profit: profit,
-            profitPercentage: ((pair.sellOrder.price - pair.buyOrder.price) / pair.buyOrder.price * 100).toFixed(4),
+            profitPercentage: buyPrice > 0 ? ((sellPrice - buyPrice) / buyPrice * 100).toFixed(4) : '0.0000',
             duration: pair.sellOrder.timestamp && pair.buyOrder.timestamp ? 
               new Date(pair.sellOrder.timestamp) - new Date(pair.buyOrder.timestamp) : 'N/A'
           });
@@ -1228,12 +1236,18 @@ class GridBotService {
     let totalSold = 0;
     
     for (const order of buyOrders) {
-      totalBought += order.quantity;
-      totalCost += order.quantity * order.price;
+      // Use executed quantity and price for accurate calculations
+      const executedQty = order.executedQty || order.quantity;
+      const executedPrice = order.executedPrice || order.price;
+      
+      totalBought += executedQty;
+      totalCost += executedQty * executedPrice;
     }
     
     for (const order of sellOrders) {
-      totalSold += order.quantity;
+      // Use executed quantity for accurate calculations
+      const executedQty = order.executedQty || order.quantity;
+      totalSold += executedQty;
     }
     
     const currentQuantity = totalBought - totalSold;
