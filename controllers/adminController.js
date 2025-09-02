@@ -335,7 +335,6 @@ const getPlatformStats = async (req, res) => {
     const pausedBotsList = allBots.filter(bot => bot.status === 'paused');
     
     const totalInvestment = allBots.reduce((sum, bot) => sum + (bot.config.investmentAmount || 0), 0);
-    const activeBotsInvestment = activeBotsList.reduce((sum, bot) => sum + (bot.config.investmentAmount || 0), 0);
     const stoppedBotsInvestment = stoppedBotsList.reduce((sum, bot) => sum + (bot.config.investmentAmount || 0), 0);
     const pausedBotsInvestment = pausedBotsList.reduce((sum, bot) => sum + (bot.config.investmentAmount || 0), 0);
     
@@ -343,18 +342,37 @@ const getPlatformStats = async (req, res) => {
     let totalRealizedProfit = 0;
     let totalUnrealizedProfit = 0;
     let totalTrades = 0;
+    let activeBotsInvestment = 0; // Will be calculated based on executed buy orders
     
     for (const bot of allBots) {
       try {
         const analysis = await gridBotService.getDetailedBotAnalysis(bot._id);
+        
+        // Always include realized profit from all bots (active, stopped, paused)
         totalRealizedProfit += analysis.profitLossAnalysis.realizedPnL || 0;
-        totalUnrealizedProfit += analysis.profitLossAnalysis.unrealizedPnL || 0;
         totalTrades += analysis.tradingActivity.totalTrades || 0;
+        
+        // Only include unrealized profit from active bots
+        if (bot.status === 'active') {
+          totalUnrealizedProfit += analysis.profitLossAnalysis.unrealizedPnL || 0;
+          
+          // Calculate actual investment for active bots based on executed buy orders
+          const filledBuyOrders = bot.orders.filter(o => o.side === 'BUY' && o.status === 'FILLED');
+          const executedBuyInvestment = filledBuyOrders.reduce((sum, order) => {
+            return sum + (order.quantity * order.price);
+          }, 0);
+          activeBotsInvestment += executedBuyInvestment;
+        }
       } catch (error) {
         console.error(`Failed to get detailed analysis for bot ${bot._id}:`, error.message);
         // Fallback to bot statistics if detailed analysis fails
         totalRealizedProfit += (bot.statistics.totalProfit || 0);
         totalTrades += (bot.statistics.totalTrades || 0);
+        
+        // For active bots, use config investment as fallback
+        if (bot.status === 'active') {
+          activeBotsInvestment += (bot.config.investmentAmount || 0);
+        }
       }
     }
     
