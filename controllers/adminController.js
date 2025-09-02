@@ -334,12 +334,13 @@ const getPlatformStats = async (req, res) => {
     const stoppedBotsList = allBots.filter(bot => bot.status === 'stopped');
     const pausedBotsList = allBots.filter(bot => bot.status === 'paused');
 
-    // FIX 1: totalInvestment should only count active bots
+    // Calculate investment amounts
     const totalInvestment = activeBotsList.reduce((sum, bot) => sum + (bot.config.investmentAmount || 0), 0);
     const stoppedBotsInvestment = stoppedBotsList.reduce((sum, bot) => sum + (bot.config.investmentAmount || 0), 0);
     const pausedBotsInvestment = pausedBotsList.reduce((sum, bot) => sum + (bot.config.investmentAmount || 0), 0);
 
-    // FIX 2: activeBotsInvestment should count only executed buy orders value
+    // activeBotsInvestment should represent actual money currently invested in active positions
+    // This should be the current value of holdings (not total executed buy orders)
     let activeBotsInvestment = 0;
 
     // Calculate accurate profit using detailed analysis method for ALL bots (active + stopped)
@@ -366,7 +367,7 @@ const getPlatformStats = async (req, res) => {
 
           console.log(`Bot ${bot._id} (active): Unrealized PnL = ${botUnrealizedProfit}`);
 
-          // FIX 2: Calculate actual investment from executed buy orders for active bots
+          // Calculate current holdings value (money currently tied up in positions)
           if (analysis.currentPositions && analysis.currentPositions.holdings) {
             let botActiveInvestment = 0;
             for (const holding of analysis.currentPositions.holdings) {
@@ -374,7 +375,9 @@ const getPlatformStats = async (req, res) => {
               botActiveInvestment += holdingValue;
               activeBotsInvestment += holdingValue;
             }
-            console.log(`Bot ${bot._id} active investment (holdings): ${botActiveInvestment}`);
+            console.log(`Bot ${bot._id} current holdings value: ${botActiveInvestment}`);
+          } else {
+            console.log(`Bot ${bot._id} has no current holdings`);
           }
         }
 
@@ -388,28 +391,53 @@ const getPlatformStats = async (req, res) => {
 
         console.log(`Bot ${bot._id} (fallback): Using statistics profit = ${fallbackProfit}`);
 
-        // For active bots, fallback to calculating executed buy orders manually
+        // For active bots, fallback to calculating current holdings manually
         if (bot.status === 'active') {
-          const executedBuyOrders = bot.orders.filter(order =>
+          // Calculate current holdings (buy orders that haven't been sold)
+          const filledBuyOrders = bot.orders.filter(order =>
             order.side === 'BUY' &&
             order.status === 'FILLED' &&
             !order.isLiquidation
           );
+          
+          const filledSellOrders = bot.orders.filter(order =>
+            order.side === 'SELL' &&
+            order.status === 'FILLED' &&
+            !order.isLiquidation
+          );
 
-          let botActiveInvestment = 0;
-          for (const order of executedBuyOrders) {
+          // Calculate net holdings (total bought - total sold)
+          let totalBought = 0;
+          let totalBoughtValue = 0;
+          let totalSold = 0;
+
+          for (const order of filledBuyOrders) {
             const executedPrice = order.executedPrice || order.price;
             const executedQty = order.executedQty || order.quantity;
-            const orderValue = executedPrice * executedQty;
-            botActiveInvestment += orderValue;
-            activeBotsInvestment += orderValue;
+            totalBought += executedQty;
+            totalBoughtValue += executedPrice * executedQty;
           }
-          console.log(`Bot ${bot._id} active investment (fallback): ${botActiveInvestment}`);
+
+          for (const order of filledSellOrders) {
+            const executedQty = order.executedQty || order.quantity;
+            totalSold += executedQty;
+          }
+
+          const netHoldings = totalBought - totalSold;
+          const avgBuyPrice = totalBought > 0 ? totalBoughtValue / totalBought : 0;
+          const currentHoldingsValue = netHoldings * avgBuyPrice;
+
+          if (netHoldings > 0) {
+            activeBotsInvestment += currentHoldingsValue;
+            console.log(`Bot ${bot._id} current holdings (fallback): ${netHoldings} units @ avg ${avgBuyPrice} = ${currentHoldingsValue}`);
+          } else {
+            console.log(`Bot ${bot._id} has no net holdings (fallback)`);
+          }
         }
       }
     }
 
-    console.log(`📊 Final calculations: Total Investment (active only) = ${totalInvestment}, Active Bots Investment (executed) = ${activeBotsInvestment}, Total Realized Profit = ${totalRealizedProfit}, Total Unrealized Profit = ${totalUnrealizedProfit}`);
+    console.log(`📊 Final calculations: Total Investment (configured) = ${totalInvestment}, Active Bots Holdings Value = ${activeBotsInvestment}, Total Realized Profit = ${totalRealizedProfit}, Total Unrealized Profit = ${totalUnrealizedProfit}`);
 
     const totalProfit = totalRealizedProfit + totalUnrealizedProfit;
 
@@ -448,11 +476,11 @@ const getPlatformStats = async (req, res) => {
           recentlyCreated: recentBots
         },
         financial: {
-          totalInvestment, // Now only active bots investment
-          activeBotsInvestment, // Now only executed buy orders value
+          totalInvestment, // Configured investment amount for active bots
+          activeBotsInvestment, // Current value of holdings in active bots (should be <= totalInvestment)
           stoppedBotsInvestment,
           pausedBotsInvestment,
-          totalProfit, // Now includes profit from both active and stopped bots
+          totalProfit, // Includes profit from both active and stopped bots
           totalRealizedProfit, // Profit from completed trades (all bots)
           totalUnrealizedProfit, // Unrealized profit from active bots only
           totalTrades,

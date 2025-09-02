@@ -2,25 +2,26 @@
 
 ## Issues Fixed
 
-### 1. **totalInvestment** - Now Only Counts Active Bots
-**Before**: Counted investment from all bots (active + stopped + paused)
-**After**: Only counts investment from active bots
+### 1. **totalInvestment** - Configured Investment for Active Bots
+**Definition**: Total configured investment amount for active bots
 ```javascript
-// OLD
-const totalInvestment = allBots.reduce((sum, bot) => sum + (bot.config.investmentAmount || 0), 0);
-
-// NEW
 const totalInvestment = activeBotsList.reduce((sum, bot) => sum + (bot.config.investmentAmount || 0), 0);
 ```
 
-### 2. **activeBotsInvestment** - Now Counts Only Executed Buy Orders Value
-**Before**: Counted total configured investment amount for active bots
-**After**: Counts actual value of executed buy orders (real money invested)
+### 2. **activeBotsInvestment** - Current Holdings Value (FIXED LOGIC)
+**Before**: Counted all executed buy orders (which could exceed configured investment)
+**After**: Counts only current holdings value (buy orders that haven't been sold yet)
+
+**Why the fix was needed**: The old logic counted ALL executed buy orders, but in grid trading:
+- Bots execute multiple buy/sell cycles
+- We should only count money currently tied up in unsold positions
+- This ensures `activeBotsInvestment` ≤ `totalInvestment`
+
 ```javascript
-// NEW Logic
+// NEW Logic - Only count current holdings
 if (analysis.currentPositions && analysis.currentPositions.holdings) {
   for (const holding of analysis.currentPositions.holdings) {
-    activeBotsInvestment += holding.quantity * holding.avgPrice;
+    activeBotsInvestment += holding.quantity * holding.avgPrice; // Current holdings value
   }
 }
 ```
