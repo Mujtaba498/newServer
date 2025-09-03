@@ -28,7 +28,7 @@ console.log('WebSocket Manager and order update listener initialized');
 
 // Initialize Admin Stats Service
 const adminStatsService = new AdminStatsService();
-adminStatsService.startPeriodicUpdates();
+adminStatsService.startBackgroundUpdates();
 console.log('Admin Stats Service initialized and periodic updates started');
 
 const globalLimiter = rateLimit({
@@ -140,7 +140,7 @@ process.on('unhandledRejection', (err) => {
   console.error('Unhandled Promise Rejection:', err);
   server.close(() => {
     webSocketManager.cleanup();
-    adminStatsService.stopPeriodicUpdates();
+    adminStatsService.stopBackgroundUpdates();
     process.exit(1);
   });
 });
@@ -148,7 +148,7 @@ process.on('unhandledRejection', (err) => {
 process.on('uncaughtException', (err) => {
   console.error('Uncaught Exception:', err);
   webSocketManager.cleanup();
-  adminStatsService.stopPeriodicUpdates();
+  adminStatsService.stopBackgroundUpdates();
   process.exit(1);
 });
 
@@ -156,7 +156,7 @@ process.on('SIGTERM', () => {
   console.log('SIGTERM received, shutting down gracefully');
   server.close(() => {
     webSocketManager.cleanup();
-    adminStatsService.stopPeriodicUpdates();
+    adminStatsService.stopBackgroundUpdates();
     process.exit(0);
   });
 });
@@ -165,7 +165,7 @@ process.on('SIGINT', () => {
   console.log('SIGINT received, shutting down gracefully');
   server.close(() => {
     webSocketManager.cleanup();
-    adminStatsService.stopPeriodicUpdates();
+    adminStatsService.stopBackgroundUpdates();
     process.exit(0);
   });
 });
