@@ -179,7 +179,7 @@ class AdminStatsService {
     };
   }
 
-  // Calculate investment statistics using the original method
+  // Calculate investment statistics using the original method with modifications
   async calculateInvestmentStats() {
     // Get all bots
     const allBots = await GridBot.find({});
@@ -187,8 +187,12 @@ class AdminStatsService {
     const stoppedBotsList = allBots.filter(bot => bot.status === 'stopped');
     const pausedBotsList = allBots.filter(bot => bot.status === 'paused');
 
-    const totalInvestment = allBots.reduce((sum, bot) => sum + (bot.config.investmentAmount || 0), 0);
-    const activeBotsInvestment = activeBotsList.reduce((sum, bot) => sum + (bot.config.investmentAmount || 0), 0);
+    // Show only active bots investment for totalInvestment
+    const totalInvestment = activeBotsList.reduce((sum, bot) => sum + (bot.config.investmentAmount || 0), 0);
+    
+    // Calculate active bots investment based on bought trade orders
+    const activeBotsInvestment = await this.calculateActiveBotsTradeInvestment(activeBotsList);
+    
     const stoppedBotsInvestment = stoppedBotsList.reduce((sum, bot) => sum + (bot.config.investmentAmount || 0), 0);
     const pausedBotsInvestment = pausedBotsList.reduce((sum, bot) => sum + (bot.config.investmentAmount || 0), 0);
 
@@ -261,6 +265,33 @@ class AdminStatsService {
         }
       })
     );
+  }
+  
+  // Calculate investment for active bots based on bought trade orders
+  async calculateActiveBotsTradeInvestment(activeBots) {
+    let totalTradeInvestment = 0;
+    
+    for (const bot of activeBots) {
+      if (!bot.orders || !Array.isArray(bot.orders)) {
+        continue;
+      }
+      
+      // Filter for buy orders that have been filled
+      const filledBuyOrders = bot.orders.filter(order => 
+        order.side === 'BUY' && 
+        order.status === 'FILLED'
+      );
+      
+      // Calculate the total investment from filled buy orders
+      const botTradeInvestment = filledBuyOrders.reduce((sum, order) => {
+        const orderValue = parseFloat(order.price) * parseFloat(order.executedQty || order.origQty);
+        return sum + (isNaN(orderValue) ? 0 : orderValue);
+      }, 0);
+      
+      totalTradeInvestment += botTradeInvestment;
+    }
+    
+    return totalTradeInvestment;
   }
 
   // Calculate total trades using the original method
