@@ -187,11 +187,12 @@ class AdminStatsService {
     const stoppedBotsList = allBots.filter(bot => bot.status === 'stopped');
     const pausedBotsList = allBots.filter(bot => bot.status === 'paused');
 
-    // Show only active bots investment for totalInvestment
-    const totalInvestment = activeBotsList.reduce((sum, bot) => sum + (bot.config.investmentAmount || 0), 0);
-    
     // Calculate active bots investment based on bought trade orders
     const activeBotsInvestment = await this.calculateActiveBotsTradeInvestment(activeBotsList);
+    
+    // Set total investment to be the sum of all investments, ensuring it's at least equal to activeBotsInvestment
+    const configBasedInvestment = activeBotsList.reduce((sum, bot) => sum + (bot.config.investmentAmount || 0), 0);
+    const totalInvestment = Math.max(configBasedInvestment, activeBotsInvestment);
     
     const stoppedBotsInvestment = stoppedBotsList.reduce((sum, bot) => sum + (bot.config.investmentAmount || 0), 0);
     const pausedBotsInvestment = pausedBotsList.reduce((sum, bot) => sum + (bot.config.investmentAmount || 0), 0);
