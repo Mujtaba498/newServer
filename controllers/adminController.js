@@ -1,33 +1,12 @@
 const User = require('../models/User');
 const GridBot = require('../models/GridBot');
 const Subscription = require('../models/Subscription');
+const AdminStats = require('../models/AdminStats');
+const AdminStatsService = require('../services/adminStatsService');
 const mongoose = require('mongoose');
-const GridBotService = require('../services/gridBotService');
 
 // Create service instance
-const gridBotService = new GridBotService();
-
-// Simple in-memory cache for admin stats (5 minute TTL)
-let adminStatsCache = {
-  data: null,
-  timestamp: 0,
-  ttl: 5 * 60 * 1000 // 5 minutes
-};
-
-const getCachedAdminStats = () => {
-  const now = Date.now();
-  if (adminStatsCache.data && (now - adminStatsCache.timestamp) < adminStatsCache.ttl) {
-    console.log('📊 Returning cached admin stats');
-    return adminStatsCache.data;
-  }
-  return null;
-};
-
-const setCachedAdminStats = (data) => {
-  adminStatsCache.data = data;
-  adminStatsCache.timestamp = Date.now();
-  console.log('📊 Admin stats cached for 5 minutes');
-};
+const adminStatsService = new AdminStatsService();
 
 // Get all users with their basic information
 const getAllUsers = async (req, res) => {
@@ -327,237 +306,72 @@ const getAllBots = async (req, res) => {
   }
 };
 
-// Get platform statistics
+// Get platform statistics (admin only)
 const getPlatformStats = async (req, res) => {
   try {
-    // Check cache first
-    const cachedStats = getCachedAdminStats();
-    if (cachedStats) {
+    console.log('📊 Fetching admin stats from database...');
+    const startTime = Date.now();
+    
+    // Get latest stats from database
+    const latestStats = await AdminStats.getLatest();
+    
+    if (!latestStats) {
+      // If no stats exist, trigger immediate calculation
+      console.log('⚠️ No admin stats found in database, triggering calculation...');
+      await adminStatsService.forceCalculation();
+      
+      // Fetch the newly calculated stats
+      const newStats = await AdminStats.getLatest();
+      
+      if (!newStats) {
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to calculate admin statistics'
+        });
+      }
+      
+      console.log(`⚡ Admin stats fetched in ${Date.now() - startTime}ms (with calculation)`);
+      
       return res.json({
         success: true,
         message: 'Platform statistics retrieved successfully',
-        data: cachedStats
+        data: {
+          users: newStats.users,
+          subscriptions: newStats.subscriptions,
+          bots: newStats.bots,
+          financial: newStats.financial,
+          lastUpdated: newStats.lastUpdated,
+          calculationDuration: newStats.calculationDuration
+        }
       });
     }
-
-    console.log('📊 Starting optimized admin stats calculation...');
-    const startTime = Date.now();
-
-    // Parallel execution of basic counts for better performance
-    const [
-      totalUsers,
-      adminUsers,
-      regularUsers,
-      usersWithBinance,
-      totalSubscriptions,
-      activeSubscriptions,
-      premiumSubscriptions,
-      freeSubscriptions,
-      expiredSubscriptions,
-      cancelledSubscriptions,
-      totalBots,
-      activeBots,
-      stoppedBots,
-      pausedBots
-    ] = await Promise.all([
-      User.countDocuments(),
-      User.countDocuments({ role: 'admin' }),
-      User.countDocuments({ role: 'user' }),
-      User.countDocuments({ 'binanceCredentials.isConfigured': true }),
-      Subscription.countDocuments(),
-      Subscription.countDocuments({ status: 'active' }),
-      Subscription.countDocuments({ planType: 'premium', status: 'active' }),
-      Subscription.countDocuments({ planType: 'free', status: 'active' }),
-      Subscription.countDocuments({ status: 'expired' }),
-      Subscription.countDocuments({ status: 'cancelled' }),
-      GridBot.countDocuments(),
-      GridBot.countDocuments({ status: 'active' }),
-      GridBot.countDocuments({ status: 'stopped' }),
-      GridBot.countDocuments({ status: 'paused' })
-    ]);
-
-    // Calculate users without subscriptions
-    const usersWithoutSubscription = totalUsers - totalSubscriptions;
-
-    // Use MongoDB aggregation for financial statistics - much faster than individual processing
-    const financialStats = await GridBot.aggregate([
-      {
-        $group: {
-          _id: '$status',
-          totalInvestment: { $sum: '$config.investmentAmount' },
-          totalRealizedProfit: { $sum: '$statistics.totalProfit' },
-          totalTrades: { $sum: '$statistics.totalTrades' },
-          count: { $sum: 1 }
-        }
-      }
-    ]);
-
-    // Process aggregation results
-    let totalInvestment = 0;
-    let stoppedBotsInvestment = 0;
-    let pausedBotsInvestment = 0;
-    let totalRealizedProfit = 0;
-    let totalTrades = 0;
-    let activeBotsInvestment = 0;
-
-    financialStats.forEach(stat => {
-      totalRealizedProfit += stat.totalRealizedProfit || 0;
-      totalTrades += stat.totalTrades || 0;
-      
-      if (stat._id === 'active') {
-        totalInvestment = stat.totalInvestment || 0;
-      } else if (stat._id === 'stopped') {
-        stoppedBotsInvestment = stat.totalInvestment || 0;
-      } else if (stat._id === 'paused') {
-        pausedBotsInvestment = stat.totalInvestment || 0;
-      }
-    });
-
-    // For unrealized PnL, only process active bots (much faster)
-    let totalUnrealizedProfit = 0;
     
-    if (activeBots > 0) {
-      console.log(`📊 Processing ${activeBots} active bots for unrealized PnL...`);
-      
-      // Get only active bots with minimal data needed
-      const activeBotsList = await GridBot.find(
-        { status: 'active' },
-        { _id: 1, symbol: 1, orders: 1, statistics: 1 }
-      ).lean(); // Use lean() for better performance
-
-      // Process active bots in parallel batches for better performance
-      const batchSize = 5; // Process 5 bots at a time
-      const batches = [];
-      
-      for (let i = 0; i < activeBotsList.length; i += batchSize) {
-        batches.push(activeBotsList.slice(i, i + batchSize));
-      }
-
-      for (const batch of batches) {
-        const batchPromises = batch.map(async (bot) => {
-          try {
-            // Try detailed analysis first
-            const analysis = await gridBotService.getDetailedBotAnalysis(bot._id);
-            const unrealizedPnL = analysis.profitLossAnalysis.unrealizedPnL || 0;
-            
-            // Calculate current holdings value for active investment
-            let botActiveInvestment = 0;
-            if (analysis.currentPositions && analysis.currentPositions.holdings) {
-              for (const holding of analysis.currentPositions.holdings) {
-                botActiveInvestment += holding.quantity * holding.avgPrice;
-              }
-            }
-            
-            return { unrealizedPnL, activeInvestment: botActiveInvestment };
-          } catch (error) {
-            console.warn(`⚠️ Detailed analysis failed for bot ${bot._id}, using fallback`);
-            
-            // Fast fallback calculation using existing order data
-            const filledBuyOrders = bot.orders?.filter(order =>
-              order.side === 'BUY' && order.status === 'FILLED' && !order.isLiquidation
-            ) || [];
-            
-            const filledSellOrders = bot.orders?.filter(order =>
-              order.side === 'SELL' && order.status === 'FILLED' && !order.isLiquidation
-            ) || [];
-
-            let totalBought = 0;
-            let totalBoughtValue = 0;
-            let totalSold = 0;
-
-            filledBuyOrders.forEach(order => {
-              const price = order.executedPrice || order.price;
-              const qty = order.executedQty || order.quantity;
-              totalBought += qty;
-              totalBoughtValue += price * qty;
-            });
-
-            filledSellOrders.forEach(order => {
-              totalSold += order.executedQty || order.quantity;
-            });
-
-            const netHoldings = totalBought - totalSold;
-            const avgBuyPrice = totalBought > 0 ? totalBoughtValue / totalBought : 0;
-            const activeInvestment = netHoldings > 0 ? netHoldings * avgBuyPrice : 0;
-            
-            return { unrealizedPnL: 0, activeInvestment }; // Fallback doesn't calculate unrealized PnL
-          }
-        });
-
-        const batchResults = await Promise.all(batchPromises);
-        
-        batchResults.forEach(result => {
-          totalUnrealizedProfit += result.unrealizedPnL;
-          activeBotsInvestment += result.activeInvestment;
-        });
-      }
+    // Check if stats are too old (older than 20 minutes)
+    const statsAge = Date.now() - new Date(latestStats.lastUpdated).getTime();
+    const maxAge = 20 * 60 * 1000; // 20 minutes
+    
+    if (statsAge > maxAge) {
+      console.log(`⚠️ Admin stats are ${Math.round(statsAge / 60000)} minutes old, triggering background update...`);
+      // Trigger background calculation but don't wait for it
+      adminStatsService.forceCalculation().catch(error => {
+        console.error('Background stats calculation failed:', error);
+      });
     }
-
-    const totalProfit = totalRealizedProfit + totalUnrealizedProfit;
-    const executionTime = Date.now() - startTime;
     
-    console.log(`📊 Optimized stats calculation completed in ${executionTime}ms`);
-    console.log(`📊 Results: Investment=${totalInvestment}, Active Investment=${activeBotsInvestment}, Realized=${totalRealizedProfit}, Unrealized=${totalUnrealizedProfit}`);
-
-    // Get recent activity (last 7 days)
-    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-    const recentUsers = await User.countDocuments({ createdAt: { $gte: sevenDaysAgo } });
-    const recentBots = await GridBot.countDocuments({ createdAt: { $gte: sevenDaysAgo } });
-
-    console.log(`⚡ Admin stats calculated in ${Date.now() - startTime}ms`);
-    console.log('📊 Final Results:', {
-      totalBots, activeBots, totalRealizedProfit, totalUnrealizedProfit, totalTrades
-    });
-
-    const responseData = {
-      users: {
-        total: totalUsers,
-        admins: adminUsers,
-        regular: regularUsers,
-        withBinanceConfig: usersWithBinance,
-        recentSignups: recentUsers
-      },
-      subscriptions: {
-        total: totalSubscriptions,
-        active: activeSubscriptions,
-        premium: premiumSubscriptions,
-        free: freeSubscriptions,
-        expired: expiredSubscriptions,
-        cancelled: cancelledSubscriptions,
-        usersWithoutSubscription: usersWithoutSubscription,
-        subscriptionRate: totalUsers > 0 ? ((totalSubscriptions / totalUsers) * 100).toFixed(2) : 0,
-        premiumRate: totalUsers > 0 ? ((premiumSubscriptions / totalUsers) * 100).toFixed(2) : 0
-      },
-      bots: {
-        total: totalBots,
-        active: activeBots,
-        stopped: stoppedBots,
-        paused: pausedBots,
-        recentlyCreated: recentBots
-      },
-      financial: {
-        totalInvestment, // Configured investment amount for active bots
-        activeBotsInvestment, // Current value of holdings in active bots (should be <= totalInvestment)
-        stoppedBotsInvestment,
-        pausedBotsInvestment,
-        totalProfit, // Includes profit from both active and stopped bots
-        totalRealizedProfit, // Profit from completed trades (all bots)
-        totalUnrealizedProfit, // Unrealized profit from active bots only
-        totalTrades,
-        profitPercentage: totalInvestment > 0 ? ((totalProfit / totalInvestment) * 100).toFixed(2) : 0,
-        realizedProfitPercentage: totalInvestment > 0 ? ((totalRealizedProfit / totalInvestment) * 100).toFixed(2) : 0,
-        averageInvestmentPerBot: activeBots > 0 ? (totalInvestment / activeBots).toFixed(2) : 0,
-        averageProfitPerBot: totalBots > 0 ? (totalProfit / totalBots).toFixed(2) : 0
-      }
-    };
-
-    // Cache the results
-    setCachedAdminStats(responseData);
-
-    res.status(200).json({
+    console.log(`⚡ Admin stats fetched from database in ${Date.now() - startTime}ms`);
+    
+    res.json({
       success: true,
       message: 'Platform statistics retrieved successfully',
-      data: responseData
+      data: {
+        users: latestStats.users,
+        subscriptions: latestStats.subscriptions,
+        bots: latestStats.bots,
+        financial: latestStats.financial,
+        lastUpdated: latestStats.lastUpdated,
+        calculationDuration: latestStats.calculationDuration,
+        isStale: statsAge > maxAge
+      }
     });
   } catch (error) {
     console.error('Get platform stats error:', error);

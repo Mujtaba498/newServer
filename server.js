@@ -8,6 +8,7 @@ const { PORT, FRONTEND_URL, validateEnvVars } = require('./config/env');
 const connectDB = require('./config/database');
 const webSocketManager = require('./services/webSocketManager');
 const recoveryService = require('./services/recoveryService');
+const AdminStatsService = require('./services/adminStatsService');
 const authRoutes = require('./routes/auth');
 const gridBotRoutes = require('./routes/gridBot');
 const adminRoutes = require('./routes/admin');
@@ -24,6 +25,11 @@ connectDB();
 webSocketManager.initialize();
 webSocketManager.initializeOrderUpdateListener();
 console.log('WebSocket Manager and order update listener initialized');
+
+// Initialize Admin Stats Service
+const adminStatsService = new AdminStatsService();
+adminStatsService.startPeriodicUpdates();
+console.log('Admin Stats Service initialized and periodic updates started');
 
 const globalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -134,6 +140,7 @@ process.on('unhandledRejection', (err) => {
   console.error('Unhandled Promise Rejection:', err);
   server.close(() => {
     webSocketManager.cleanup();
+    adminStatsService.stopPeriodicUpdates();
     process.exit(1);
   });
 });
@@ -141,6 +148,7 @@ process.on('unhandledRejection', (err) => {
 process.on('uncaughtException', (err) => {
   console.error('Uncaught Exception:', err);
   webSocketManager.cleanup();
+  adminStatsService.stopPeriodicUpdates();
   process.exit(1);
 });
 
@@ -148,6 +156,7 @@ process.on('SIGTERM', () => {
   console.log('SIGTERM received, shutting down gracefully');
   server.close(() => {
     webSocketManager.cleanup();
+    adminStatsService.stopPeriodicUpdates();
     process.exit(0);
   });
 });
@@ -156,6 +165,7 @@ process.on('SIGINT', () => {
   console.log('SIGINT received, shutting down gracefully');
   server.close(() => {
     webSocketManager.cleanup();
+    adminStatsService.stopPeriodicUpdates();
     process.exit(0);
   });
 });
