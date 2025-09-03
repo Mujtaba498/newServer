@@ -179,39 +179,18 @@ class AdminStatsService {
     };
   }
 
-  // Calculate investment statistics using aggregation
+  // Calculate investment statistics using the original method
   async calculateInvestmentStats() {
-    const investmentAggregation = await GridBot.aggregate([
-      {
-        $group: {
-          _id: '$status',
-          totalInvestment: { $sum: '$investment' },
-          count: { $sum: 1 }
-        }
-      }
-    ]);
+    // Get all bots
+    const allBots = await GridBot.find({});
+    const activeBotsList = allBots.filter(bot => bot.status === 'active');
+    const stoppedBotsList = allBots.filter(bot => bot.status === 'stopped');
+    const pausedBotsList = allBots.filter(bot => bot.status === 'paused');
 
-    let totalInvestment = 0;
-    let activeBotsInvestment = 0;
-    let stoppedBotsInvestment = 0;
-    let pausedBotsInvestment = 0;
-
-    investmentAggregation.forEach(group => {
-      const investment = group.totalInvestment || 0;
-      totalInvestment += investment;
-      
-      switch (group._id) {
-        case 'active':
-          activeBotsInvestment = investment;
-          break;
-        case 'stopped':
-          stoppedBotsInvestment = investment;
-          break;
-        case 'paused':
-          pausedBotsInvestment = investment;
-          break;
-      }
-    });
+    const totalInvestment = allBots.reduce((sum, bot) => sum + (bot.config.investmentAmount || 0), 0);
+    const activeBotsInvestment = activeBotsList.reduce((sum, bot) => sum + (bot.config.investmentAmount || 0), 0);
+    const stoppedBotsInvestment = stoppedBotsList.reduce((sum, bot) => sum + (bot.config.investmentAmount || 0), 0);
+    const pausedBotsInvestment = pausedBotsList.reduce((sum, bot) => sum + (bot.config.investmentAmount || 0), 0);
 
     return {
       totalInvestment,
@@ -219,25 +198,21 @@ class AdminStatsService {
       stoppedBotsInvestment,
       pausedBotsInvestment
     };
+
+
   }
 
-  // Calculate profit statistics
+  // Calculate profit statistics using the original method
   async calculateProfitStats() {
-    // Get realized profit from aggregation
-    const realizedProfitAggregation = await GridBot.aggregate([
-      {
-        $group: {
-          _id: null,
-          totalRealizedProfit: { $sum: '$realizedProfit' }
-        }
-      }
-    ]);
-
-    const totalRealizedProfit = realizedProfitAggregation[0]?.totalRealizedProfit || 0;
+    // Get all bots
+    const allBots = await GridBot.find({});
+    
+    // Calculate realized profit directly from bot statistics
+    const totalRealizedProfit = allBots.reduce((sum, bot) => sum + (bot.statistics.totalProfit || 0), 0);
 
     // Calculate unrealized profit for active bots
     let totalUnrealizedProfit = 0;
-    const activeBots = await GridBot.find({ status: 'active' }).select('_id symbol investment');
+    const activeBots = await GridBot.find({ status: 'active' }).select('_id symbol config.investmentAmount orders');
     
     if (activeBots.length > 0) {
       console.log(`📊 Calculating unrealized PnL for ${activeBots.length} active bots...`);
@@ -288,19 +263,16 @@ class AdminStatsService {
     );
   }
 
-  // Calculate total trades
+  // Calculate total trades using the original method
   async calculateTradesStats() {
-    const tradesAggregation = await GridBot.aggregate([
-      {
-        $group: {
-          _id: null,
-          totalTrades: { $sum: '$totalTrades' }
-        }
-      }
-    ]);
-
+    // Get all bots
+    const allBots = await GridBot.find({});
+    
+    // Calculate total trades directly from bot statistics
+    const totalTrades = allBots.reduce((sum, bot) => sum + (bot.statistics.totalTrades || 0), 0);
+    
     return {
-      totalTrades: tradesAggregation[0]?.totalTrades || 0
+      totalTrades
     };
   }
 
