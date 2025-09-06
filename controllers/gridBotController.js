@@ -118,8 +118,8 @@ const createGridBot = async (req, res) => {
       });
     }
 
-    // Check for duplicate bot names for this user
-    const existingBot = await GridBot.findOne({ userId, name: name.trim() });
+    // Check for duplicate bot names for this user (excluding soft-deleted bots)
+    const existingBot = await GridBot.findOne({ userId, name: name.trim(), deleted: false });
     if (existingBot) {
       return res.status(400).json({
         success: false,
@@ -206,7 +206,7 @@ const createGridBot = async (req, res) => {
       const startResult = await gridBotService.startBot(gridBot._id);
       
       // Fetch updated bot with active status
-      const updatedBot = await GridBot.findById(gridBot._id);
+      const updatedBot = await GridBot.findOne({ _id: gridBot._id, deleted: false });
       
       console.log(`Bot ${gridBot._id} created and started successfully`);
       res.status(201).json({
@@ -228,10 +228,16 @@ const createGridBot = async (req, res) => {
     } catch (startError) {
       console.error('Failed to auto-start bot:', startError.message);
       
-      // If auto-start fails, delete the created bot to maintain consistency
+      // If auto-start fails, soft delete the created bot to maintain consistency
       try {
-        await GridBot.findByIdAndDelete(gridBot._id);
-        console.log(`Cleaned up failed bot ${gridBot._id}`);
+        const botToCleanup = await GridBot.findById(gridBot._id);
+        if (botToCleanup) {
+          botToCleanup.deleted = true;
+          botToCleanup.deletedAt = new Date();
+          botToCleanup.status = 'stopped';
+          await botToCleanup.save();
+          console.log(`Soft deleted failed bot ${gridBot._id}`);
+        }
       } catch (cleanupError) {
         console.error('Failed to cleanup bot after start failure:', cleanupError.message);
       }
@@ -256,13 +262,13 @@ const createGridBot = async (req, res) => {
   }
 };
 
-// Get all user's grid bots
+// Get all user's grid bots (excluding deleted)
 const getUserGridBots = async (req, res) => {
   try {
     const userId = req.user._id;
     const { status, symbol } = req.query;
 
-    const filter = { userId };
+    const filter = { userId, deleted: false };
     if (status) filter.status = status;
     if (symbol) filter.symbol = symbol.toUpperCase();
 
@@ -284,13 +290,13 @@ const getUserGridBots = async (req, res) => {
   }
 };
 
-// Get specific grid bot
+// Get specific grid bot (excluding deleted)
 const getGridBot = async (req, res) => {
   try {
     const { botId } = req.params;
     const userId = req.user._id;
 
-    const gridBot = await GridBot.findOne({ _id: botId, userId });
+    const gridBot = await GridBot.findOne({ _id: botId, userId, deleted: false });
     
     if (!gridBot) {
       return res.status(404).json({
@@ -320,7 +326,7 @@ const startGridBot = async (req, res) => {
     const { botId } = req.params;
     const userId = req.user._id;
 
-    const gridBot = await GridBot.findOne({ _id: botId, userId });
+    const gridBot = await GridBot.findOne({ _id: botId, userId, deleted: false });
     
     if (!gridBot) {
       return res.status(404).json({
@@ -358,7 +364,7 @@ const stopGridBot = async (req, res) => {
     const { botId } = req.params;
     const userId = req.user._id;
 
-    const gridBot = await GridBot.findOne({ _id: botId, userId });
+    const gridBot = await GridBot.findOne({ _id: botId, userId, deleted: false });
     
     if (!gridBot) {
       return res.status(404).json({
@@ -396,7 +402,7 @@ const pauseGridBot = async (req, res) => {
     const { botId } = req.params;
     const userId = req.user._id;
 
-    const gridBot = await GridBot.findOne({ _id: botId, userId });
+    const gridBot = await GridBot.findOne({ _id: botId, userId, deleted: false });
     
     if (!gridBot) {
       return res.status(404).json({
@@ -436,13 +442,13 @@ const pauseGridBot = async (req, res) => {
   }
 };
 
-// Delete a grid bot
+// Delete a grid bot (soft delete)
 const deleteGridBot = async (req, res) => {
   try {
     const { botId } = req.params;
     const userId = req.user._id;
 
-    const gridBot = await GridBot.findOne({ _id: botId, userId });
+    const gridBot = await GridBot.findOne({ _id: botId, userId, deleted: false });
     
     if (!gridBot) {
       return res.status(404).json({
@@ -456,8 +462,11 @@ const deleteGridBot = async (req, res) => {
       await gridBotService.stopBot(botId);
     }
 
-    // Delete bot
-    await GridBot.findByIdAndDelete(botId);
+    // Soft delete bot - mark as deleted but keep data for statistics
+    gridBot.deleted = true;
+    gridBot.deletedAt = new Date();
+    gridBot.status = 'stopped'; // Ensure status is stopped
+    await gridBot.save();
 
     res.status(200).json({
       success: true,
@@ -478,7 +487,7 @@ const getGridBotPerformance = async (req, res) => {
     const { botId } = req.params;
     const userId = req.user._id;
 
-    const gridBot = await GridBot.findOne({ _id: botId, userId });
+    const gridBot = await GridBot.findOne({ _id: botId, userId, deleted: false });
     
     if (!gridBot) {
       return res.status(404).json({
@@ -510,8 +519,8 @@ const getDetailedGridBotAnalysis = async (req, res) => {
     const { botId } = req.params;
     const userId = req.user._id;
 
-    // Verify bot ownership
-    const gridBot = await GridBot.findOne({ _id: botId, userId });
+    // Verify bot ownership (excluding deleted)
+    const gridBot = await GridBot.findOne({ _id: botId, userId, deleted: false });
     
     if (!gridBot) {
       return res.status(404).json({

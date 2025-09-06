@@ -1,6 +1,7 @@
 const User = require('../models/User');
 const GridBot = require('../models/GridBot');
 const Subscription = require('../models/Subscription');
+const Payment = require('../models/Payment');
 const AdminStats = require('../models/AdminStats');
 const AdminStatsService = require('../services/adminStatsService');
 const mongoose = require('mongoose');
@@ -38,8 +39,8 @@ const getAllUsers = async (req, res) => {
     // Get bot counts and subscription status for each user
     const usersWithBotCounts = await Promise.all(
       users.map(async (user) => {
-        const botCount = await GridBot.countDocuments({ userId: user._id });
-        const activeBots = await GridBot.countDocuments({ userId: user._id, status: 'active' });
+        const botCount = await GridBot.countDocuments({ userId: user._id, deleted: false });
+        const activeBots = await GridBot.countDocuments({ userId: user._id, deleted: false, status: 'active' });
 
         // Get subscription status
         const subscription = await Subscription.findOne({ userId: user._id });
@@ -47,17 +48,37 @@ const getAllUsers = async (req, res) => {
           planType: 'free',
           status: 'active',
           isActive: false,
-          endDate: null
+          endDate: null,
+          premiumSource: null
         };
 
         if (subscription) {
           const isActive = subscription.status === 'active' && new Date() < new Date(subscription.endDate);
+          
+          // Determine premium source
+          let premiumSource = null;
+          if (subscription.planType === 'premium') {
+            if (subscription.paymentId && subscription.paymentId.startsWith('admin_upgrade_')) {
+              premiumSource = 'admin_granted';
+            } else if (subscription.paymentId) {
+              // Check if there's a corresponding payment record
+              const payment = await Payment.findOne({ 
+                subscriptionId: subscription._id,
+                status: 'paid'
+              });
+              premiumSource = payment ? 'cryptomus_payment' : 'admin_granted';
+            } else {
+              premiumSource = 'admin_granted';
+            }
+          }
+          
           subscriptionStatus = {
             planType: subscription.planType,
             status: subscription.status,
             isActive: isActive,
             endDate: subscription.endDate,
-            startDate: subscription.startDate
+            startDate: subscription.startDate,
+            premiumSource: premiumSource
           };
         }
 
@@ -120,8 +141,8 @@ const getUserDetails = async (req, res) => {
       });
     }
 
-    // Get all bots for this user
-    const bots = await GridBot.find({ userId })
+    // Get all bots for this user (excluding soft-deleted)
+    const bots = await GridBot.find({ userId, deleted: false })
       .sort({ createdAt: -1 });
 
     // Get detailed analysis for each bot
@@ -236,8 +257,8 @@ const getAllBots = async (req, res) => {
     const { page = 1, limit = 20, status = '', symbol = '', userId = '' } = req.query;
     const skip = (page - 1) * limit;
 
-    // Build query
-    let query = {};
+    // Build query (exclude soft-deleted bots)
+    let query = { deleted: false };
     if (status && ['active', 'stopped', 'paused'].includes(status)) {
       query.status = status;
     }
@@ -479,10 +500,82 @@ const upgradeUserToPremium = async (req, res) => {
   }
 };
 
+// Downgrade user to free status manually (admin only)
+const downgradeUserToFree = async (req, res) => {
+  try {
+    const { userId } = req.params;
+
+    // Validate userId
+    if (!mongoose.Types.ObjectId.isValid(userId)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid user ID'
+      });
+    }
+
+    // Check if user exists
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    // Check if user has any subscription
+    const existingSubscription = await Subscription.findOne({ userId: userId });
+
+    if (!existingSubscription) {
+      return res.status(400).json({
+        success: false,
+        message: 'User does not have any subscription to downgrade'
+      });
+    }
+
+    // Check if user is already on free plan
+    if (existingSubscription.planType === 'free') {
+      return res.status(400).json({
+        success: false,
+        message: 'User is already on free plan'
+      });
+    }
+
+    // Downgrade to free plan
+    existingSubscription.planType = 'free';
+    existingSubscription.status = 'active';
+    existingSubscription.endDate = null; // Free plan doesn't have end date
+    existingSubscription.paymentId = `admin_downgrade_${Date.now()}_${userId}`;
+    existingSubscription.autoRenew = false;
+
+    await existingSubscription.save();
+
+    return res.status(200).json({
+      success: true,
+      message: 'User successfully downgraded to free plan',
+      data: {
+        subscription: existingSubscription,
+        user: {
+          id: user._id,
+          name: user.name,
+          email: user.email
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Error downgrading user to free:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+      error: error.message
+    });
+  }
+};
+
 module.exports = {
   getAllUsers,
   getUserDetails,
   getAllBots,
   getPlatformStats,
-  upgradeUserToPremium
+  upgradeUserToPremium,
+  downgradeUserToFree
 };

@@ -23,7 +23,7 @@ class RecoveryService {
       // Find all bots that should be running
       const activeBots = await GridBot.find({ 
         status: { $in: ['active', 'recovering'] },
-        isDeleted: { $ne: true }
+        deleted: false
       });
 
       console.log(`Found ${activeBots.length} bots to check for recovery`);
@@ -749,7 +749,7 @@ class RecoveryService {
    */
   async getRecoveryStatus(botId) {
     try {
-      const bot = await GridBot.findById(botId);
+      const bot = await GridBot.findOne({ _id: botId, deleted: false });
       if (!bot) {
         return { error: 'Bot not found' };
       }

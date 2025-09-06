@@ -30,7 +30,7 @@ class GridBotService {
       for (const [botId, bot] of this.activeBots) {
         if (bot.userId.toString() === userIdStr && bot.symbol === symbol) {
           // Refresh bot data from database to ensure we have latest state
-          const freshBot = await GridBot.findById(botId);
+          const freshBot = await GridBot.findOne({ _id: botId, deleted: false });
           if (freshBot && freshBot.orders.some(order => order.orderId.toString() === orderIdStr)) {
             console.log(`✅ Found bot ${botId} in active cache with order ${orderIdStr}`);
             return freshBot;
@@ -43,7 +43,8 @@ class GridBotService {
       let bot = await GridBot.findOne({
         userId: userId,
         symbol: symbol,
-        'orders.orderId': orderIdStr
+        'orders.orderId': orderIdStr,
+        deleted: false
       });
       
       // If still not found, retry once after a short delay (for timing issues with recovery orders)
@@ -54,7 +55,8 @@ class GridBotService {
         bot = await GridBot.findOne({
           userId: userId,
           symbol: symbol,
-          'orders.orderId': orderIdStr
+          'orders.orderId': orderIdStr,
+          deleted: false
         });
       }
       
@@ -71,7 +73,8 @@ class GridBotService {
         // Additional debug: Search for any bot with this symbol for this user
         const anyBotForSymbol = await GridBot.findOne({
           userId: userId,
-          symbol: symbol
+          symbol: symbol,
+          deleted: false
         });
         
         if (anyBotForSymbol) {
@@ -199,7 +202,7 @@ class GridBotService {
   async createInitialGridOrders(botId) {
     try {
       console.log(`Creating initial grid orders for bot ${botId}`);
-      const bot = await GridBot.findById(botId);
+      const bot = await GridBot.findOne({ _id: botId, deleted: false });
       if (!bot) throw new Error('Bot not found');
 
       // Get user-specific Binance service
@@ -376,7 +379,7 @@ class GridBotService {
   // Monitor and manage grid orders
   async monitorGridOrders(botId) {
     try {
-      const bot = await GridBot.findById(botId);
+      const bot = await GridBot.findOne({ _id: botId, deleted: false });
       if (!bot || bot.status !== 'active') return;
 
       const userBinance = await this.getUserBinanceService(bot.userId);
@@ -430,7 +433,7 @@ class GridBotService {
       console.error(`Error monitoring grid orders for bot ${botId}:`, error.message);
       
       // Update bot with error
-      const bot = await GridBot.findById(botId);
+      const bot = await GridBot.findOne({ _id: botId, deleted: false });
       if (bot) {
         bot.lastError = {
           message: error.message,
@@ -595,7 +598,7 @@ class GridBotService {
   async startBot(botId) {
     try {
       console.log(`Starting bot ${botId}...`);
-      const bot = await GridBot.findById(botId);
+      const bot = await GridBot.findOne({ _id: botId, deleted: false });
       if (!bot) throw new Error('Bot not found');
 
       if (bot.status === 'active') {
@@ -667,7 +670,7 @@ class GridBotService {
       
       // Cleanup: Ensure bot status is not left in inconsistent state
       try {
-        const bot = await GridBot.findById(botId);
+        const bot = await GridBot.findOne({ _id: botId, deleted: false });
         if (bot && bot.status !== 'paused') {
           bot.status = 'paused';
           await bot.save();
@@ -684,7 +687,7 @@ class GridBotService {
   // Stop a grid bot
   async stopBot(botId) {
     try {
-      const bot = await GridBot.findById(botId);
+      const bot = await GridBot.findOne({ _id: botId, deleted: false });
       if (!bot) throw new Error('Bot not found');
 
       // Cancel all open orders
@@ -930,7 +933,7 @@ class GridBotService {
   // Get bot performance
   async getBotPerformance(botId) {
     try {
-      const bot = await GridBot.findById(botId);
+      const bot = await GridBot.findOne({ _id: botId, deleted: false });
       if (!bot) throw new Error('Bot not found');
 
        const userBinance = await this.getUserBinanceService(bot.userId);
@@ -978,7 +981,7 @@ class GridBotService {
   // Get detailed bot analysis with complete trade history and PnL breakdown
   async getDetailedBotAnalysis(botId) {
     try {
-      const bot = await GridBot.findById(botId);
+      const bot = await GridBot.findOne({ _id: botId, deleted: false });
       if (!bot) throw new Error('Bot not found');
 
       const userBinance = await this.getUserBinanceService(bot.userId);
@@ -1006,7 +1009,7 @@ class GridBotService {
       await this.syncOrderStatusWithBinance(bot, userBinance);
       
       // Reload bot after sync to get updated order statuses
-      const updatedBot = await GridBot.findById(botId);
+      const updatedBot = await GridBot.findOne({ _id: botId, deleted: false });
       
       // Separate orders by status and type
       const filledOrders = updatedBot.orders.filter(o => o.status === 'FILLED');

@@ -97,7 +97,7 @@ const GridBot = require('../models/GridBot');
 
 router.post('/:botId/recover', gridBotLimiter, gridBotIdValidation, async (req, res) => {
   try {
-    const bot = await GridBot.findById(req.params.botId);
+    const bot = await GridBot.findOne({ _id: req.params.botId, deleted: false });
     if (!bot) {
       return res.status(404).json({
         success: false,

@@ -279,6 +279,14 @@ const gridBotSchema = new mongoose.Schema({
         type: Number
       }
     }
+  },
+  deleted: {
+    type: Boolean,
+    default: false,
+    index: true
+  },
+  deletedAt: {
+    type: Date
   }
 }, {
   timestamps: true
@@ -393,11 +401,21 @@ gridBotSchema.methods.updateOrderStatus = function(orderId, newStatus, executedQ
 
 // **STATIC METHODS**
 gridBotSchema.statics.findActiveByUser = function(userId) {
-  return this.find({ userId, status: 'active' });
+  return this.find({ userId, status: 'active', deleted: false });
 };
 
 gridBotSchema.statics.findByUserAndSymbol = function(userId, symbol) {
-  return this.find({ userId, symbol: symbol.toUpperCase() });
+  return this.find({ userId, symbol: symbol.toUpperCase(), deleted: false });
+};
+
+// For statistics - include all bots (even deleted ones)
+gridBotSchema.statics.findAllByUser = function(userId) {
+  return this.find({ userId });
+};
+
+// For user queries - exclude deleted bots
+gridBotSchema.statics.findActiveByUserExcludeDeleted = function(userId) {
+  return this.find({ userId, deleted: false });
 };
 
 gridBotSchema.statics.getPerformanceStats = function(userId) {

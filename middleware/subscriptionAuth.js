@@ -83,7 +83,7 @@ const enforceBotLimits = async (req, res, next) => {
     }
     
     // Check bot count limit
-    const userBotCount = await GridBot.countDocuments({ userId });
+    const userBotCount = await GridBot.countDocuments({ userId, deleted: false });
     
     if (userBotCount >= planLimits.maxBots) {
       return res.status(403).json({
@@ -98,7 +98,7 @@ const enforceBotLimits = async (req, res, next) => {
     
     // Check total investment limit for premium users
     if (req.subscription.planType === 'premium' && planLimits.maxTotalInvestment) {
-      const userBots = await GridBot.find({ userId }, 'config.investmentAmount');
+      const userBots = await GridBot.find({ userId, deleted: false }, 'config.investmentAmount');
       const currentTotalInvestment = userBots.reduce((total, bot) => total + (bot.config?.investmentAmount || 0), 0);
       const newTotalInvestment = currentTotalInvestment + investmentAmount;
       
@@ -161,14 +161,15 @@ const attachSubscriptionInfo = (req, res, next) => {
 // Helper function to get user's current bot usage
 const getUserBotUsage = async (userId) => {
   try {
-    const totalBots = await GridBot.countDocuments({ userId });
+    const totalBots = await GridBot.countDocuments({ userId, deleted: false });
     const activeBots = await GridBot.countDocuments({ 
       userId, 
+      deleted: false,
       status: { $in: ['running', 'paused'] } 
     });
     
     const totalInvestment = await GridBot.aggregate([
-      { $match: { userId } },
+      { $match: { userId, deleted: false } },
       { $group: { _id: null, total: { $sum: '$investment' } } }
     ]);
     
@@ -208,6 +209,7 @@ const validateSubscriptionAction = (action) => {
           // Check if user can start more bots
           const activeBots = await GridBot.countDocuments({ 
             userId, 
+            deleted: false,
             status: { $in: ['running'] } 
           });
           

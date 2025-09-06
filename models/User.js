@@ -203,7 +203,7 @@ userSchema.methods.canCreateBot = async function(investment) {
   }
   
   // Check bot count limit
-  const botCount = await GridBot.countDocuments({ userId: this._id });
+  const botCount = await GridBot.countDocuments({ userId: this._id, deleted: false });
   if (botCount >= limits.maxBots) {
     return {
       canCreate: false,

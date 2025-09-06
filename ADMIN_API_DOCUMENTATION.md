@@ -357,6 +357,97 @@ curl -X POST "http://localhost:5000/api/admin/users/USER_ID_HERE/upgrade-premium
 - Total investment limit of $1000 across all bots (vs $100 per bot for free users)
 - Access to advanced bot features and analytics
 
+### 6. Downgrade User to Free
+
+**Endpoint:** `POST /api/admin/users/:userId/downgrade-free`
+
+**Description:** Manually downgrade any premium user to free status. This endpoint allows administrators to revoke premium access and return users to the free plan.
+
+**Path Parameters:**
+- `userId` (required): The ID of the user to downgrade
+
+**Request Body:**
+- No body parameters required
+
+**cURL Example:**
+```bash
+curl -X POST "http://localhost:5000/api/admin/users/USER_ID_HERE/downgrade-free" \
+  -H "Authorization: Bearer YOUR_ADMIN_JWT_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+**Success Response:**
+```json
+{
+  "success": true,
+  "message": "User successfully downgraded to free plan",
+  "data": {
+    "subscription": {
+      "_id": "subscription_id",
+      "userId": "user_id",
+      "planType": "free",
+      "status": "active",
+      "startDate": "2024-01-01T00:00:00.000Z",
+      "endDate": null,
+      "paymentId": "admin_downgrade_1704067200000_user_id",
+      "autoRenew": false,
+      "createdAt": "2024-01-01T00:00:00.000Z",
+      "updatedAt": "2024-01-01T00:00:00.000Z"
+    },
+    "user": {
+      "id": "user_id",
+      "name": "John Doe",
+      "email": "john@example.com"
+    }
+  }
+}
+```
+
+**Error Responses:**
+
+**400 Bad Request (Invalid User ID):**
+```json
+{
+  "success": false,
+  "message": "Invalid user ID"
+}
+```
+
+**400 Bad Request (No Subscription):**
+```json
+{
+  "success": false,
+  "message": "User does not have any subscription to downgrade"
+}
+```
+
+**400 Bad Request (Already Free):**
+```json
+{
+  "success": false,
+  "message": "User is already on free plan"
+}
+```
+
+**404 Not Found (User Not Found):**
+```json
+{
+  "success": false,
+  "message": "User not found"
+}
+```
+
+**Features:**
+- **Immediate Downgrade**: Premium features are revoked immediately
+- **Unique Payment ID**: Generates unique payment IDs for admin downgrades for tracking purposes
+- **Validation**: Prevents downgrading users who are already on free plan
+- **Data Preservation**: User data and bot history are preserved during downgrade
+
+**Free Plan Limitations After Downgrade:**
+- Maximum of 1 bot (premium bots beyond limit will be automatically stopped)
+- Total investment limit of $100 per bot
+- Limited access to advanced features and analytics
+
 ## Admin Access to Regular Features
 
 Admins can access all regular user features including:
