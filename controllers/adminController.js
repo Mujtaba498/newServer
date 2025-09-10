@@ -571,11 +571,55 @@ const downgradeUserToFree = async (req, res) => {
   }
 };
 
+// Get detailed grid bot analysis for any bot (admin only)
+const getGridBotAnalysisAdmin = async (req, res) => {
+  try {
+    const { botId } = req.params;
+    const GridBotService = require('../services/gridBotService');
+    const GridBot = require('../models/GridBot');
+    
+    const gridBotService = new GridBotService();
+
+    // Verify bot exists (no user ownership check for admin)
+    const gridBot = await GridBot.findOne({ _id: botId, deleted: false });
+    
+    if (!gridBot) {
+      return res.status(404).json({
+        success: false,
+        message: 'Grid bot not found'
+      });
+    }
+
+    // Get detailed analysis
+    const analysis = await gridBotService.getDetailedBotAnalysis(botId);
+
+    res.status(200).json({
+      success: true,
+      message: 'Detailed bot analysis retrieved successfully (Admin Access)',
+      data: {
+        analysis,
+        botOwner: {
+          userId: gridBot.userId,
+          botName: gridBot.name,
+          symbol: gridBot.symbol
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Admin get detailed grid bot analysis error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Server error while fetching detailed analysis'
+    });
+  }
+};
+
 module.exports = {
   getAllUsers,
   getUserDetails,
   getAllBots,
   getPlatformStats,
   upgradeUserToPremium,
-  downgradeUserToFree
+  downgradeUserToFree,
+  getGridBotAnalysisAdmin
 };

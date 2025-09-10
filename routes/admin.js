@@ -6,7 +6,8 @@ const {
   getAllBots,
   getPlatformStats,
   upgradeUserToPremium,
-  downgradeUserToFree
+  downgradeUserToFree,
+  getGridBotAnalysisAdmin
 } = require('../controllers/adminController');
 const { protect } = require('../middleware/auth');
 const { adminOnly } = require('../middleware/adminAuth');
@@ -35,6 +36,7 @@ router.get('/users/:userId', adminLimiter, getUserDetails);
 router.post('/users/:userId/upgrade-premium', adminLimiter, upgradeUserToPremium);
 router.post('/users/:userId/downgrade-free', adminLimiter, downgradeUserToFree);
 router.get('/bots', adminLimiter, getAllBots);
+router.get('/grid-bots/:botId/analysis', adminLimiter, getGridBotAnalysisAdmin);
 router.get('/stats', adminLimiter, getPlatformStats);
 
 module.exports = router;
